@@ -34,7 +34,26 @@ class ModeRouterTest(unittest.TestCase):
 
         self.assertEqual(self.router.route(request), AgentMode.PERSONAL)
 
+    def test_routes_by_entry_point_when_text_is_ambiguous(self) -> None:
+        request = AgentRequest(
+            user_id="u1",
+            role="employee",
+            message="帮我总结一下",
+            entry_point="knowledge",
+        )
+
+        self.assertEqual(self.router.route(request), AgentMode.KNOWLEDGE)
+
+    def test_execution_intent_overrides_entry_point(self) -> None:
+        request = AgentRequest(
+            user_id="u1",
+            role="employee",
+            message="帮我发消息给客户",
+            entry_point="knowledge",
+        )
+
+        self.assertEqual(self.router.route(request), AgentMode.EXECUTION)
+
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -1,0 +1,2 @@
+"""Management brief chain placeholder."""
+

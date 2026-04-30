@@ -1,0 +1,2 @@
+"""Personal brief chain placeholder."""
+

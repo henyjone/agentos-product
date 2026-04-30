@@ -1,0 +1,2 @@
+"""CoWork chain placeholder."""
+

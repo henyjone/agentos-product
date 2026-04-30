@@ -6,9 +6,9 @@ from .modes import AgentMode
 
 @dataclass(frozen=True)
 class SourceReference:
-    source_id: str
-    source_type: str
+    id: str
     title: str
+    source_type: str
     url: Optional[str] = None
     sensitivity: str = "internal"
 
@@ -18,7 +18,8 @@ class AgentRequest:
     user_id: str
     role: str
     message: str
-    entrypoint: str = "chat"
+    entry_point: str = "chat"
+    context_hint: dict[str, Any] = field(default_factory=dict)
     context: dict[str, Any] = field(default_factory=dict)
 
 
@@ -46,11 +47,18 @@ class SafetyState:
 
 
 @dataclass(frozen=True)
+class AnswerItem:
+    content: str
+    source_id: Optional[str] = None
+    confidence: str = "medium"
+
+
+@dataclass(frozen=True)
 class Answer:
     summary: str
-    facts: list[str] = field(default_factory=list)
-    inferences: list[str] = field(default_factory=list)
-    suggestions: list[str] = field(default_factory=list)
+    facts: list[AnswerItem] = field(default_factory=list)
+    inferences: list[AnswerItem] = field(default_factory=list)
+    suggestions: list[AnswerItem] = field(default_factory=list)
 
 
 @dataclass(frozen=True)

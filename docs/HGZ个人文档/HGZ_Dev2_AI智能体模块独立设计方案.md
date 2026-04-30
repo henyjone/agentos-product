@@ -148,10 +148,33 @@ agent_engine
 
 - 当前用户角色
 - 当前页面或入口
+- 页面传入的上下文提示
 - 上下文权限
 - 是否包含执行动作
 - 是否请求敏感信息
 - 是否需要知识检索
+
+Mode Router 的最小输入：
+
+```json
+{
+  "user_id": "u_123",
+  "role": "manager",
+  "message": "帮我总结一下",
+  "entry_point": "projects",
+  "context_hint": {
+    "project_id": "pay-service",
+    "mode_hint": "team"
+  },
+  "context": {}
+}
+```
+
+字段说明：
+
+- `entry_point` 由 Dev3 调用时传入，例如 `chat`、`dashboard`、`projects`、`personal_brief`、`cowork`、`knowledge`、`approvals`、`audit`、`admin`。
+- `context_hint` 用于传页面或业务对象提示，例如 `project_id`、`team_id`、`customer_id`、`mode_hint`。
+- 执行动作和治理/敏感访问意图优先级高于页面提示，避免用户在知识页面发起高风险动作时被误路由为 Knowledge Mode。
 
 ---
 
@@ -164,11 +187,37 @@ Agent 对前端和后端输出统一结构。
   "mode": "management",
   "answer": {
     "summary": "今天最大的风险是支付项目验收延期。",
-    "facts": [],
-    "inferences": [],
-    "suggestions": []
+    "facts": [
+      {
+        "content": "支付项目最近 3 天没有新的验收记录。",
+        "source_id": "project_status:pay-service:20260430",
+        "confidence": "high"
+      }
+    ],
+    "inferences": [
+      {
+        "content": "如果今天仍未完成验收，本周上线窗口可能被压缩。",
+        "source_id": "project_status:pay-service:20260430",
+        "confidence": "medium"
+      }
+    ],
+    "suggestions": [
+      {
+        "content": "建议项目负责人在今日下班前确认验收 owner 和剩余问题。",
+        "source_id": "project_status:pay-service:20260430",
+        "confidence": "medium"
+      }
+    ]
   },
-  "sources": [],
+  "sources": [
+    {
+      "id": "project_status:pay-service:20260430",
+      "title": "支付项目状态 - 2026-04-30",
+      "url": "https://agentos.local/projects/pay-service/status/2026-04-30",
+      "source_type": "project",
+      "sensitivity": "internal"
+    }
+  ],
   "actions": [],
   "requires_confirmation": false,
   "uncertainty": {
@@ -181,6 +230,36 @@ Agent 对前端和后端输出统一结构。
   }
 }
 ```
+
+`facts` / `inferences` / `suggestions` 的 item schema：
+
+```json
+{
+  "content": "...",
+  "source_id": "...",
+  "confidence": "high|medium|low"
+}
+```
+
+`sources` 的 item schema：
+
+```json
+{
+  "id": "project_status:pay-service:20260430",
+  "title": "支付项目状态 - 2026-04-30",
+  "url": "https://agentos.local/projects/pay-service/status/2026-04-30",
+  "source_type": "project|meeting|document|customer_event|task|code|manual",
+  "sensitivity": "public|internal|private|restricted"
+}
+```
+
+引用规则：
+
+- `facts[].source_id`、`inferences[].source_id`、`suggestions[].source_id` 必须引用 `sources[].id`。
+- 如果某条推断来自多个来源，第一版先选择主要来源；后续可扩展为 `source_ids`。
+- Dev4 提供来源数据时必须保证 `id` 在单次响应内唯一。
+- Dev3 渲染来源列表时以 `sources` 为准，不从自然语言中解析出处。
+- `actions` 的 item schema 见第 7 节 Agent Action 定义。
 
 要求：
 
@@ -288,9 +367,39 @@ version
 
 Agent 只依赖这些字段，不关心底层是文件、数据库还是后端 API。
 
+`scope` 合法值：
+
+| scope | 含义 | 默认访问边界 |
+|---|---|---|
+| `personal` | 个人记忆、私人共事上下文、个人偏好 | 仅本人和经授权的 Agent 可用 |
+| `team` | 团队项目上下文、团队会议结论、团队协作事实 | 团队成员和授权负责人可用 |
+| `org` | 组织级公开事实、跨团队决策、公司知识 | 按组织权限可用 |
+| `restricted` | 受限敏感信息，如人事、财务、法务、安全事件 | 默认不可进入普通 Agent 上下文，必须走受控访问 |
+
+FileMemoryAdapter 和 BackendMemoryAdapter 都必须按 `scope` 过滤。Agent 不允许把 `personal` 私人讨论自动提升为 `team` 或 `org` 记忆。
+
 ---
 
 ## 9. 核心 Chain
+
+### 9.0 Chain Runner 实现方式
+
+MVP 阶段不引入 LangChain 或 LangGraph。
+
+第一版采用手写调用链：
+
+```text
+Context Retrieval
+  -> Prompt Template
+  -> Model Client
+  -> Structured Output Parser
+  -> Safety Guard
+  -> Response Builder
+```
+
+模型调用通过 `ModelClient` 抽象封装，默认实现可以使用 Anthropic SDK 或公司统一模型代理。`agent_engine` 的 chain 代码不直接依赖 LangChain / LangGraph，避免早期依赖复杂度和调试成本。
+
+后续只有在出现复杂状态图、可视化编排、多分支恢复、长流程 checkpoint 等明确需求时，再评估引入 LangGraph。
 
 ### 9.1 Management Brief Chain
 
@@ -397,6 +506,15 @@ src/
     risk.py
     orchestrator.py
     memory.py
+    model.py
+    chains/
+      __init__.py
+      base.py
+      management_brief.py
+      project_status.py
+      personal_brief.py
+      knowledge_answer.py
+      cowork.py
     README.md
 
 tests/
@@ -413,6 +531,9 @@ tests/
 - `risk.py` 实现高风险动作识别。
 - `orchestrator.py` 串联路由、上下文、响应和风险判断。
 - `memory.py` 定义 MemoryClient 协议和 file-backed adapter 占位。
+- `model.py` 定义 ModelClient 协议，封装 Anthropic SDK 或公司统一模型代理。
+- `chains/base.py` 定义手写 chain 的基础接口。
+- `chains/management_brief.py`、`project_status.py`、`personal_brief.py`、`knowledge_answer.py`、`cowork.py` 分别承载第 9 节的核心 chain，避免把场景逻辑堆进 `orchestrator.py`。
 
 ---
 
@@ -462,12 +583,14 @@ tests/
 ## 13. 第一阶段开发顺序
 
 1. 建立 `agent_engine` Python 包和测试目录。
-2. 实现 `AgentMode`、`AgentRequest`、`AgentResponse`、`AgentAction` 等基础 schema。
-3. 实现基础 Mode Router。
-4. 实现基础 Risk Classifier。
-5. 实现 Orchestrator 最小闭环。
-6. 增加 MemoryClient 协议，不绑定具体存储。
-7. 和 Dev1 对齐 Agent Action Schema。
-8. 和 Dev3 对齐 Agent Response Schema。
-9. 和 Dev4 对齐 Context Retrieval / Knowledge Search 返回格式。
-10. 编写 Agent eval cases，覆盖核心路由和安全边界。
+2. 定义 `AgentMode`、`AgentRequest`、`AgentResponse`、`AgentAction`、`AnswerItem` 等基础 schema 草案。
+3. 和 Dev1 对齐 Agent Action Schema、审批 API、权限字段和高风险动作分类。
+4. 和 Dev3 对齐 Agent Response Schema、`facts/inferences/suggestions` item schema、来源展示和审批提示字段。
+5. 和 Dev4 对齐 Context Retrieval / Knowledge Search 返回格式、source reference、sensitivity level。
+6. 固化三方最小 contract，并把 contract 写入测试样例。
+7. 实现基础 Mode Router，支持 `entry_point` 和 `context_hint`。
+8. 实现基础 Risk Classifier，基于 Dev1 的 Agent Action Schema 生成待审批动作。
+9. 增加 MemoryClient 协议，不绑定具体存储。
+10. 实现 Orchestrator 最小闭环，串联路由、上下文、风险识别和结构化响应。
+11. 实现手写 Chain Runner 和核心 chain 的第一版 prompt。
+12. 编写 Agent eval cases，覆盖核心路由、越权、审批、无来源回答和私人上下文边界。
