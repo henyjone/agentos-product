@@ -4,6 +4,7 @@ from typing import Dict, List, Optional
 from .analyzer import AnalysisResult
 from .code_context import summarize_code_changes
 from .data_builder import ClassifiedCommit, compute_stats, identify_builtin_risks
+from .rendering import bullet_list, format_counts, risk_list
 
 
 def format_ai_report(
@@ -34,26 +35,26 @@ def format_ai_report(
         "",
         "## 事实",
         "",
-        _bullet_list(analysis.facts),
+        bullet_list(analysis.facts),
         "",
         "## 推断",
         "",
-        _bullet_list(analysis.inferences),
+        bullet_list(analysis.inferences),
         "",
         "## 风险",
         "",
-        _risk_list(analysis.risks),
+        risk_list(analysis.risks),
         "",
         "## 建议",
         "",
-        _bullet_list(analysis.suggestions),
+        bullet_list(analysis.suggestions),
         "",
         "## 代码变更摘要",
         "",
         _single_code_summary(code_summary),
     ]
     if errors:
-        lines.extend(["", "## 数据拉取警告", "", _bullet_list(errors)])
+        lines.extend(["", "## 数据拉取警告", "", bullet_list(errors)])
     return "\n".join(lines).strip() + "\n"
 
 
@@ -100,7 +101,7 @@ def build_raw_report(
             "",
             "## 近期 Commit",
             "",
-            _bullet_list(
+            bullet_list(
                 [
                     "{0} {1} ({2}, {3})".format(
                         item.sha,
@@ -118,23 +119,23 @@ def build_raw_report(
             "",
             "## 开放 Issue",
             "",
-            _bullet_list(_issue_lines(raw_data.get("issues", []))),
+            bullet_list(_issue_lines(raw_data.get("issues", []))),
             "",
             "## 开放 PR",
             "",
-            _bullet_list(_pr_lines(raw_data.get("pull_requests", []))),
+            bullet_list(_pr_lines(raw_data.get("pull_requests", []))),
             "",
             "## 分支列表",
             "",
-            _bullet_list([item.get("name", "unknown") for item in raw_data.get("branches", [])]),
+            bullet_list([item.get("name", "unknown") for item in raw_data.get("branches", [])]),
             "",
             "## 内置风险信号",
             "",
-            _bullet_list(["[{0}] {1}: {2}".format(r.severity, r.signal, r.basis) for r in risks]),
+            bullet_list(["[{0}] {1}: {2}".format(r.severity, r.signal, r.basis) for r in risks]),
         ]
     )
     if errors:
-        lines.extend(["", "## 数据拉取警告", "", _bullet_list(errors)])
+        lines.extend(["", "## 数据拉取警告", "", bullet_list(errors)])
     return "\n".join(lines).strip() + "\n"
 
 
@@ -152,28 +153,9 @@ def _single_code_summary(summary) -> str:
             "- Commit 明细: {0}".format(summary.commit_count),
             "- 变更文件: {0}".format(summary.file_count),
             "- 增删行: +{0}/-{1}".format(summary.additions, summary.deletions),
-            "- 文件类型: {0}".format(_format_counts(summary.by_category)),
+            "- 文件类型: {0}".format(format_counts(summary.by_category)),
             "- 文件样例: {0}".format(", ".join(summary.touched_files) or "-"),
         ]
-    )
-
-
-def _bullet_list(items: List[str]) -> str:
-    if not items:
-        return "- 无"
-    return "\n".join("- {0}".format(item) for item in items)
-
-
-def _risk_list(items: List[Dict]) -> str:
-    if not items:
-        return "- 无"
-    return "\n".join(
-        "- [{severity}] {signal}: {basis}".format(
-            severity=item.get("severity", "medium"),
-            signal=item.get("signal", ""),
-            basis=item.get("basis", ""),
-        )
-        for item in items
     )
 
 
@@ -189,9 +171,3 @@ def _pr_lines(items: List[Dict]) -> List[str]:
         "#{0} {1} ({2})".format(item.get("number", "?"), item.get("title", ""), item.get("created_at", "")[:10])
         for item in items
     ]
-
-
-def _format_counts(counts: Dict[str, int]) -> str:
-    if not counts:
-        return "-"
-    return ", ".join("{0}:{1}".format(key, counts[key]) for key in sorted(counts))
