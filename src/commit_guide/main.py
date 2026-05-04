@@ -9,6 +9,7 @@ from .git_utils import (
     check_git_available,
     execute_commit,
     execute_push,
+    get_remotes,
     get_repo_status,
     get_staged_diff,
     is_git_repo,
@@ -25,6 +26,7 @@ class SmartCommit:
         no_ai: bool = False,
         dry_run: bool = False,
         push: bool = False,
+        push_target: Optional[str] = None,
         input_func: Callable[[str], str] = input,
         output_func: Callable[[str], None] = print,
         generator: Optional[CommitMessageGenerator] = None,
@@ -33,6 +35,7 @@ class SmartCommit:
         self.no_ai = no_ai
         self.dry_run = dry_run
         self.push = push
+        self.push_target = push_target
         self.input = input_func
         self.output = output_func
         self.generator = generator if generator is not None else CommitMessageGenerator()
@@ -132,7 +135,7 @@ class SmartCommit:
                 if not message:
                     self.output("没有可提交的 message，请先编辑。")
                     continue
-                return self._do_commit(message)
+                return self._do_commit(message, status)
 
             if label == "手动编辑":
                 message = self._manual_edit()
@@ -191,7 +194,7 @@ class SmartCommit:
             return message
         return None
 
-    def _do_commit(self, message: str) -> int:
+    def _do_commit(self, message: str, status) -> int:
         if self.dry_run:
             self.output("\n[dry-run] message: {0}".format(message))
             return 0
@@ -202,11 +205,40 @@ class SmartCommit:
         self.output("✓ 提交成功: {0}".format(result.sha or "unknown"))
 
         if self.push:
-            if execute_push(self.path):
-                self.output("✓ 推送成功")
+            remote = self.push_target or self._select_push_remote()
+            if not remote:
+                self.output("⚠ 未选择推送目标，请手动执行 git push")
+                return 0
+            if execute_push(self.path, remote=remote, branch=status.branch):
+                self.output("✓ 推送成功: {0}/{1}".format(remote, status.branch))
             else:
-                self.output("⚠ 推送失败，请手动执行 git push")
+                self.output("⚠ 推送失败，请手动执行 git push {0} {1}".format(remote, status.branch))
         return 0
+
+    def _select_push_remote(self) -> Optional[str]:
+        remotes = get_remotes(self.path)
+        if not remotes:
+            return None
+        if len(remotes) == 1:
+            return remotes[0]
+
+        self.output("\n检测到多个 Git remote，请选择推送目标:")
+        for index, remote in enumerate(remotes, start=1):
+            self.output("  [{0}] {1}".format(index, remote))
+        self.output("  [{0}] 跳过推送".format(len(remotes) + 1))
+
+        while True:
+            choice = self.input("请选择推送目标 (1-{0}): ".format(len(remotes) + 1)).strip()
+            try:
+                index = int(choice)
+            except ValueError:
+                self.output("选择无效，请重新输入")
+                continue
+            if 1 <= index <= len(remotes):
+                return remotes[index - 1]
+            if index == len(remotes) + 1:
+                return None
+            self.output("选择无效，请重新输入")
 
 
 def parse_args(argv: Optional[list] = None) -> argparse.Namespace:
@@ -215,6 +247,7 @@ def parse_args(argv: Optional[list] = None) -> argparse.Namespace:
     parser.add_argument("--path", default=".", help="指定 Git 仓库路径")
     parser.add_argument("--dry-run", action="store_true", help="预览模式，只生成不提交")
     parser.add_argument("--push", action="store_true", help="提交后自动推送")
+    parser.add_argument("--push-target", default=None, help="指定推送 remote 名称，如 origin、github、gitea")
     parser.add_argument("-v", "--version", action="version", version="commit-guide 2.0.0")
     return parser.parse_args(argv)
 
@@ -226,6 +259,7 @@ def main(argv: Optional[list] = None) -> int:
         no_ai=args.no_ai,
         dry_run=args.dry_run,
         push=args.push,
+        push_target=args.push_target,
     )
     return app.run()
 

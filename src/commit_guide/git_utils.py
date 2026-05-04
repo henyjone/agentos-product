@@ -106,6 +106,12 @@ def get_last_commit_sha(path: str = ".") -> Optional[str]:
     return result.stdout.strip()
 
 
+def get_remotes(path: str = ".") -> List[str]:
+    """Return configured git remote names."""
+    result = _run_git(["remote"], path)
+    return _stdout_lines(result)
+
+
 def get_staged_diff(path: str = ".", max_bytes: int = 24000) -> str:
     """Build a balanced staged-change context for AI.
 
@@ -189,7 +195,16 @@ def execute_commit(message: str, path: str = ".") -> CommitResult:
     return CommitResult(success=True, sha=get_last_commit_sha(path))
 
 
-def execute_push(path: str = ".") -> bool:
-    """推送当前分支到远程。返回是否成功。"""
-    result = _run_git(["push"], path)
+def execute_push(path: str = ".", remote: Optional[str] = None, branch: Optional[str] = None) -> bool:
+    """Push current branch.
+
+    If remote is provided, push explicitly to that remote and branch. Otherwise
+    fall back to plain git push, which uses git's configured upstream.
+    """
+    args = ["push"]
+    if remote:
+        args.append(remote)
+        if branch and branch not in ("HEAD", "unknown"):
+            args.append(branch)
+    result = _run_git(args, path)
     return result.returncode == 0
