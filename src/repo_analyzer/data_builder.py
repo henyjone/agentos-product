@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from .code_context import build_code_change_context
+from .project_context import build_project_context_section
 
 
 COMMIT_TYPES = ("feat", "fix", "refactor", "docs", "test", "chore", "perf", "revert")
@@ -157,6 +158,9 @@ def build_analysis_context(classified: List[ClassifiedCommit], raw_data: Dict, a
         "- 仓库: {0}".format(repo_url),
         "- 分支: {0}".format(branch),
         "- 分析范围: 最近 {0} 天".format(days),
+        "",
+        "## Project Context Documents",
+        build_project_context_section(raw_data.get("project_context", [])),
         "",
         "## Commit 统计",
         "- 总计: {0} 条".format(stats.total),

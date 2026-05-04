@@ -1,11 +1,13 @@
+import re
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Set
 
-from .analyzer import AnalysisResult
+from .analyzer import AnalysisResult, WorkSummaryResult
 from .code_context import build_code_change_context, summarize_code_changes
 from .data_builder import ClassifiedCommit, compute_stats, identify_builtin_risks
 from .gitea_client import RepoRef
-from .rendering import bullet_list, escape_cell, format_counts, risk_list
+from .project_context import build_project_context_section, summarize_project_context_documents
+from .rendering import escape_cell, format_counts
 
 
 @dataclass
@@ -124,6 +126,9 @@ def build_manager_analysis_context(
         "## Repository summary",
         _repo_table(activities[:100], getattr(args, "days", 7)),
         "",
+        "## Project context documents",
+        _project_context_sections(activities[:50]),
+        "",
         "## Code change evidence",
         _code_change_sections(activities[:50], args),
         "",
@@ -147,44 +152,18 @@ def build_manager_raw_report(
 ) -> str:
     overview = build_manager_overview(activities)
     lines = [
-        "# Gitea 管理者日报",
+        "# Gitea 工作日报",
         "",
-        "> AI 分析未启用或不可用，以下为按仓库、员工和代码变更聚合的原始数据摘要。",
+        "> 最近 {0} 天，扫描 {1} 个仓库，识别到 {2} 次提交。".format(
+            getattr(args, "days", 7),
+            overview["repo_count"],
+            overview["commit_count"],
+        ),
         "",
-        "## 总览",
+        "## 员工完成情况",
         "",
-        "- Gitea: {0}".format(getattr(args, "base_url", "")),
-        "- 分析范围: 最近 {0} 天".format(getattr(args, "days", 7)),
-        "- 扫描仓库: {0}".format(overview["repo_count"]),
-        "- 有提交的仓库: {0}".format(overview["repos_with_commits"]),
-        "- Commit 总数: {0}".format(overview["commit_count"]),
-        "- 已读取代码变更的 Commit: {0}".format(overview["code_commit_count"]),
-        "- 开放 Issue: {0}".format(overview["open_issue_count"]),
-        "- 开放 PR: {0}".format(overview["open_pr_count"]),
-        "- 拉取警告: {0}".format(overview["error_count"]),
-        "",
-        "## 员工每日任务说明",
-        "",
-        _employee_daily_tasks_section(employees),
-        "",
-        "## 项目说明",
-        "",
-        _project_briefs_section(activities, getattr(args, "days", 7)),
-        "",
-        "## 按员工汇总",
-        "",
-        _employee_table(employees),
-        "",
-        "## 按仓库汇总",
-        "",
-        _repo_table(activities, getattr(args, "days", 7)),
-        "",
-        "## 代码变更摘要",
-        "",
-        _code_report_sections(activities, args),
+        _employee_work_digest_section(employees),
     ]
-    if history_report:
-        lines.extend(["", "## 历史参考", "", history_report])
     errors = _error_lines(activities)
     if errors:
         lines.extend(["", "## 数据拉取警告", "", errors])
@@ -200,61 +179,95 @@ def format_manager_ai_report(
 ) -> str:
     overview = build_manager_overview(activities)
     lines = [
-        "# Gitea 管理者日报",
+        "# Gitea 工作日报",
         "",
-        analysis.summary.strip(),
+        "> 最近 {0} 天，扫描 {1} 个仓库，识别到 {2} 次提交。".format(
+            getattr(args, "days", 7),
+            overview["repo_count"],
+            overview["commit_count"],
+        ),
         "",
-        "## 数据总览",
+        "## 员工完成情况",
         "",
-        "- Gitea: {0}".format(getattr(args, "base_url", "")),
-        "- 分析范围: 最近 {0} 天".format(getattr(args, "days", 7)),
-        "- 扫描仓库: {0}".format(overview["repo_count"]),
-        "- Commit 总数: {0}".format(overview["commit_count"]),
-        "- 已读取代码变更的 Commit: {0}".format(overview["code_commit_count"]),
-        "- 开放 Issue: {0}".format(overview["open_issue_count"]),
-        "- 开放 PR: {0}".format(overview["open_pr_count"]),
-        "",
-        "## 员工每日任务说明",
-        "",
-        _employee_daily_tasks_section(employees),
-        "",
-        "## 项目说明",
-        "",
-        _project_briefs_section(activities, getattr(args, "days", 7)),
-        "",
-        "## 事实",
-        "",
-        bullet_list(analysis.facts),
-        "",
-        "## 推断",
-        "",
-        bullet_list(analysis.inferences),
-        "",
-        "## 风险",
-        "",
-        risk_list(analysis.risks),
-        "",
-        "## 建议",
-        "",
-        bullet_list(analysis.suggestions),
-        "",
-        "## 按员工汇总",
-        "",
-        _employee_table(employees),
-        "",
-        "## 按仓库汇总",
-        "",
-        _repo_table(activities, getattr(args, "days", 7)),
-        "",
-        "## 代码变更摘要",
-        "",
-        _code_report_sections(activities, args),
+        _employee_work_digest_section(employees),
     ]
-    if history_report:
-        lines.extend(["", "## 历史参考", "", history_report])
     errors = _error_lines(activities)
     if errors:
         lines.extend(["", "## 数据拉取警告", "", errors])
+    return "\n".join(lines).strip() + "\n"
+
+
+def build_manager_work_summary_context(
+    activities: List[RepositoryActivity],
+    employees: List[EmployeeSummary],
+    args,
+) -> str:
+    overview = build_manager_overview(activities)
+    lines = [
+        "# Employee work summary context",
+        "",
+        "## Scope",
+        "- Base URL: {0}".format(getattr(args, "base_url", "")),
+        "- Range: last {0} days".format(getattr(args, "days", 7)),
+        "- Repositories scanned: {0}".format(overview["repo_count"]),
+        "- Commits: {0}".format(overview["commit_count"]),
+        "- Commits with code details: {0}".format(overview["code_commit_count"]),
+        "",
+        "## Employee evidence",
+    ]
+    for employee in employees:
+        lines.extend(
+            [
+                "### {0}".format(employee.identity),
+                "- Commit count: {0}".format(employee.commits),
+                "- Code files: {0}".format(employee.code_files),
+                "- Additions/deletions: +{0}/-{1}".format(employee.additions, employee.deletions),
+                "- Commit samples:",
+                "\n".join("- {0}".format(item) for item in employee.samples[:8]) or "- None",
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "## Project context documents",
+            _project_context_sections(activities[:50]),
+            "",
+            "Only return employees and completed work items. Do not include related project lists.",
+        ]
+    )
+    return _truncate("\n".join(lines), 18000)
+
+
+def format_manager_work_summary_report(
+    summary: WorkSummaryResult,
+    activities: List[RepositoryActivity],
+    args,
+) -> str:
+    overview = build_manager_overview(activities)
+    lines = [
+        "# Gitea 工作日报",
+        "",
+        "> 最近 {0} 天，扫描 {1} 个仓库，识别到 {2} 次提交。".format(
+            getattr(args, "days", 7),
+            overview["repo_count"],
+            overview["commit_count"],
+        ),
+        "",
+        "## 员工完成情况",
+        "",
+    ]
+    for employee in summary.employees:
+        lines.extend(
+            [
+                "### {0}".format(employee.name),
+                "- 完成工作:",
+                _numbered_list(employee.work_items),
+                "",
+            ]
+        )
+    errors = _error_lines(activities)
+    if errors:
+        lines.extend(["## 数据拉取警告", "", errors, ""])
     return "\n".join(lines).strip() + "\n"
 
 
@@ -343,6 +356,23 @@ def _repo_table(activities: List[RepositoryActivity], days: int) -> str:
     return "\n".join(lines)
 
 
+def _project_context_sections(activities: List[RepositoryActivity]) -> str:
+    sections: List[str] = []
+    for activity in activities:
+        documents = activity.raw_data.get("project_context", [])
+        if not documents:
+            continue
+        sections.extend(
+            [
+                "### {0}".format(_repo_name(activity.repo)),
+                "- Documents: {0}".format(summarize_project_context_documents(documents)),
+                build_project_context_section(documents, max_chars_per_file=1600),
+                "",
+            ]
+        )
+    return "\n".join(sections).strip() or "- No project context documents found."
+
+
 def _code_change_sections(activities: List[RepositoryActivity], args) -> str:
     sections: List[str] = []
     max_files = getattr(args, "max_files_per_commit", 12)
@@ -385,6 +415,22 @@ def _code_report_sections(activities: List[RepositoryActivity], args) -> str:
             )
         )
     return "\n".join(sections) if sections else "- No code diff details were fetched."
+
+
+def _employee_work_digest_section(employees: List[EmployeeSummary]) -> str:
+    if not employees:
+        return "- 暂无员工工作记录"
+    lines: List[str] = []
+    for employee in employees:
+        lines.extend(
+            [
+                "### {0}".format(employee.identity),
+                "- 完成工作:",
+                _numbered_list(_employee_completed_work_items(employee)),
+                "",
+            ]
+        )
+    return "\n".join(lines).strip()
 
 
 def _employee_daily_tasks_section(employees: List[EmployeeSummary]) -> str:
@@ -438,13 +484,29 @@ def _project_briefs_section(activities: List[RepositoryActivity], days: int) -> 
 
 
 def _employee_completed_work(employee: EmployeeSummary) -> str:
+    return "；".join(_employee_completed_work_items(employee))
+
+
+def _employee_completed_work_items(employee: EmployeeSummary) -> List[str]:
     if not employee.samples:
-        return "未从最近提交中识别到明确完成项"
+        return ["未从最近提交中识别到明确完成项"]
     descriptions = []
     for sample in employee.samples[:3]:
         parts = sample.split(" ", 2)
-        descriptions.append(parts[-1] if parts else sample)
-    return "；".join(descriptions)
+        descriptions.append(_clean_work_description(parts[-1] if parts else sample))
+    return descriptions
+
+
+def _numbered_list(items: List[str]) -> str:
+    if not items:
+        return "1. 未识别到明确完成项"
+    return "\n".join("{0}. {1}".format(index, item.rstrip("；;。")) for index, item in enumerate(items, start=1))
+
+
+def _clean_work_description(value: str) -> str:
+    text = value.strip()
+    text = re.sub(r"^(feat|fix|refactor|docs|test|chore|perf|revert)(\([^)]+\))?:\s*", "", text)
+    return text or value
 
 
 def _employee_progress(employee: EmployeeSummary) -> str:

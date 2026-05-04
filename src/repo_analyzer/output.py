@@ -4,6 +4,7 @@ from typing import Dict, List, Optional
 from .analyzer import AnalysisResult
 from .code_context import summarize_code_changes
 from .data_builder import ClassifiedCommit, compute_stats, identify_builtin_risks
+from .project_context import build_project_context_section
 from .rendering import bullet_list, format_counts, risk_list
 
 
@@ -32,6 +33,10 @@ def format_ai_report(
         "- 代码变更文件: {0}".format(code_summary.file_count),
         "- 开放 Issue: {0}".format(len(raw_data.get("issues", []))),
         "- 开放 PR: {0}".format(len(raw_data.get("pull_requests", []))),
+        "",
+        "## 项目上下文",
+        "",
+        build_project_context_section(raw_data.get("project_context", [])),
         "",
         "## 事实",
         "",
@@ -83,6 +88,10 @@ def build_raw_report(
         "- 代码变更文件: {0}".format(code_summary.file_count),
         "- 开放 Issue: {0}".format(len(raw_data.get("issues", []))),
         "- 开放 PR: {0}".format(len(raw_data.get("pull_requests", []))),
+        "",
+        "## 项目上下文",
+        "",
+        build_project_context_section(raw_data.get("project_context", [])),
         "",
         "## Commit 分类统计",
         "",

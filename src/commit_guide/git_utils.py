@@ -1,4 +1,5 @@
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
@@ -196,16 +197,32 @@ def execute_commit(message: str, path: str = ".") -> CommitResult:
 
 
 def execute_push(
-    path: str = ".", remote: Optional[str] = None, branch: Optional[str] = None
+    path: str = ".",
+    remote: Optional[str] = None,
+    branch: Optional[str] = None,
+    max_attempts: int = 3,
+    retry_delay_seconds: float = 1.0,
 ) -> tuple:
-    """Push current branch. Returns (success, stderr_detail)."""
+    """Push current branch. Returns (success, stderr_detail).
+
+    Some internal Gitea deployments intermittently reject the first HTTP
+    authentication attempt. Retrying here keeps the CLI friendly while still
+    returning the final Git error when all attempts fail.
+    """
     args = ["push"]
     if remote:
         args.append(remote)
         if branch and branch not in ("HEAD", "unknown"):
             args.append(branch)
-    result = _run_git(args, path)
-    if result.returncode == 0:
-        return True, ""
-    detail = (result.stderr or result.stdout or "").strip()
-    return False, detail
+    attempts = max(1, max_attempts)
+    last_detail = ""
+    for attempt in range(1, attempts + 1):
+        result = _run_git(args, path)
+        if result.returncode == 0:
+            return True, ""
+        last_detail = (result.stderr or result.stdout or "").strip()
+        if attempt < attempts and retry_delay_seconds > 0:
+            time.sleep(retry_delay_seconds)
+    if attempts > 1:
+        return False, "已重试 {0} 次，最后错误: {1}".format(attempts, last_detail or "未知错误")
+    return False, last_detail

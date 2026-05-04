@@ -1,7 +1,8 @@
 import time
+import base64
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import requests
 
@@ -230,6 +231,41 @@ def fetch_commit_detail(
     if isinstance(detail, dict):
         return detail
     return {}
+
+
+def fetch_file_content(
+    client: GiteaClient,
+    owner: str,
+    repo: str,
+    filepath: str,
+    ref: Optional[str] = None,
+) -> Dict:
+    quoted_path = quote(filepath.replace("\\", "/"), safe="/")
+    path = "/repos/{0}/{1}/contents/{2}".format(owner, repo, quoted_path)
+    params = {"ref": ref} if ref else None
+    content = client._request("GET", path, params)
+    if not isinstance(content, dict):
+        return {}
+    decoded = decode_content_payload(content)
+    if decoded is not None:
+        content["decoded_content"] = decoded
+    return content
+
+
+def decode_content_payload(payload: Dict) -> Optional[str]:
+    raw = payload.get("content")
+    if not raw or payload.get("type") not in (None, "file"):
+        return None
+    if str(payload.get("encoding", "base64")).lower() != "base64":
+        return str(raw)
+    try:
+        data = base64.b64decode(str(raw).encode("utf-8"), validate=False)
+    except (ValueError, TypeError):
+        return None
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
 
 
 def list_repositories(
