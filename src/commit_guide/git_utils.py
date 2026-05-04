@@ -195,16 +195,17 @@ def execute_commit(message: str, path: str = ".") -> CommitResult:
     return CommitResult(success=True, sha=get_last_commit_sha(path))
 
 
-def execute_push(path: str = ".", remote: Optional[str] = None, branch: Optional[str] = None) -> bool:
-    """Push current branch.
-
-    If remote is provided, push explicitly to that remote and branch. Otherwise
-    fall back to plain git push, which uses git's configured upstream.
-    """
+def execute_push(
+    path: str = ".", remote: Optional[str] = None, branch: Optional[str] = None
+) -> tuple:
+    """Push current branch. Returns (success, stderr_detail)."""
     args = ["push"]
     if remote:
         args.append(remote)
         if branch and branch not in ("HEAD", "unknown"):
             args.append(branch)
     result = _run_git(args, path)
-    return result.returncode == 0
+    if result.returncode == 0:
+        return True, ""
+    detail = (result.stderr or result.stdout or "").strip()
+    return False, detail

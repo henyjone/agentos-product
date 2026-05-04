@@ -209,10 +209,11 @@ class SmartCommit:
             if not remote:
                 self.output("⚠ 未选择推送目标，请手动执行 git push")
                 return 0
-            if execute_push(self.path, remote=remote, branch=status.branch):
+            ok, detail = execute_push(self.path, remote=remote, branch=status.branch)
+            if ok:
                 self.output("✓ 推送成功: {0}/{1}".format(remote, status.branch))
             else:
-                self.output("⚠ 推送失败，请手动执行 git push {0} {1}".format(remote, status.branch))
+                self.output("⚠ 推送失败: {0}".format(detail or "未知错误"))
         return 0
 
     def _select_push_remote(self) -> Optional[str]:
