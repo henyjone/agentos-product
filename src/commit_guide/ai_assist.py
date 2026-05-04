@@ -9,20 +9,28 @@ from .config_loader import get_default_model_config
 from .types import COMMIT_TYPE_KEYS, is_valid_commit_message
 
 _SYSTEM_PROMPT = (
-    "你是一个 Git commit message 生成助手。"
-    "根据提供的 git diff 内容，生成一条符合以下格式的 commit message：\n"
+    "你是一个资深工程师，负责根据暂存区变更生成 Git commit message。"
+    "你会收到 staged 文件清单、stat、numstat 和按文件截断后的 diff 片段。"
+    "必须综合所有暂存文件，不要只根据第一个文件或最大文档判断。\n"
     "\n"
+    "输出格式：\n"
+    "第一行必须是一条符合 Conventional Commit 的 subject：\n"
     "  type(scope): 描述\n"
+    "空一行后可以写 2-5 条正文要点，每条以 '- ' 开头。\n"
     "\n"
     "规则：\n"
     "1. type 必须是以下之一：{type_list}\n"
     "2. scope 可选，填受影响的模块名（英文），无明确模块时省略\n"
-    "3. 描述用中文，简洁说明\"做了什么\"，5-100 字符\n"
-    "4. 只输出 commit message 本身，不要解释，不要加引号\n"
+    "3. subject 描述用中文，简洁说明主要工程变更，5-100 字符\n"
+    "4. 如果同时包含代码和文档，优先以代码变更决定 type/scope，正文再补充文档\n"
+    "5. 正文要点覆盖主要代码变更、文档/测试变更，不要编造 diff 中没有的信息\n"
+    "6. 只输出 commit message 本身，不要解释，不要加引号\n"
     "\n"
     "示例输出：\n"
-    "feat(auth): 新增 JWT 登录接口\n"
-    "fix: 修复用户列表分页错误"
+    "feat(commit-guide): 支持基于暂存区 diff 生成提交说明\n"
+    "\n"
+    "- 新增 AI 分析暂存区 diff 的提交信息生成流程\n"
+    "- 补充配置读取、Git 状态检测和手动编辑降级逻辑"
 ).format(type_list=" / ".join(COMMIT_TYPE_KEYS))
 
 
@@ -74,15 +82,9 @@ class CommitMessageGenerator:
             "model": self.model_config["model"],
             "messages": [
                 {"role": "system", "content": _SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": "暂存区文件:\n{files}\n\ngit diff:\n{diff}".format(
-                        files="\n".join("- {0}".format(f) for f in staged_files),
-                        diff=diff,
-                    ),
-                },
+                {"role": "user", "content": diff},
             ],
-            "max_tokens": 256,
+            "max_tokens": 1024,
             "temperature": 0.3,
         }
 
@@ -97,23 +99,46 @@ class CommitMessageGenerator:
             return GenerateResult(success=False, reason=str(exc))
 
         if response.status_code != 200:
+            detail = response.text[:500] if response.text else "no body"
             return GenerateResult(
                 success=False,
-                reason="AI API error: {0}".format(response.status_code),
+                reason="AI API error {0}: {1}".format(response.status_code, detail),
             )
 
         try:
             data = response.json()
-            raw = data["choices"][0]["message"]["content"].strip()
-        except (KeyError, IndexError, ValueError) as exc:
+        except ValueError as exc:
             return GenerateResult(
-                success=False, reason="failed to parse AI response: {0}".format(exc)
+                success=False,
+                reason="failed to parse AI response JSON: {0}".format(exc),
             )
 
-        if not raw:
+        try:
+            message_obj = data["choices"][0]["message"]
+        except (KeyError, IndexError, TypeError) as exc:
+            import json as _json
             return GenerateResult(
-                success=False, reason="AI returned empty response"
+                success=False,
+                reason="unexpected AI response structure: {0} | body={1}".format(
+                    exc,
+                    _json.dumps(data, ensure_ascii=False)[:500],
+                ),
             )
+
+        raw = (message_obj.get("content") or "").strip()
+        # DeepSeek 等推理模型可能把结果放在 reasoning_content 而非 content
+        if not raw:
+            reasoning = (message_obj.get("reasoning_content") or "").strip()
+            if reasoning:
+                raw = reasoning
+            else:
+                import json as _json
+                return GenerateResult(
+                    success=False,
+                    reason="AI returned empty content | message={0}".format(
+                        _json.dumps(message_obj, ensure_ascii=False)[:500],
+                    ),
+                )
 
         message = self._extract_message(raw)
         if message and is_valid_commit_message(message):
@@ -138,12 +163,25 @@ class CommitMessageGenerator:
         clean = [l for l in lines if not l.startswith("```")]
         if not clean:
             return None
-        # 优先返回第一行，若第一行不以 type 开头则逐行查找
+        message_lines = []
+        started = False
         for line in clean:
-            line = line.strip()
-            if line and not line.startswith("#") and not line.startswith("//"):
-                return line
-        return clean[0].strip() if clean else None
+            stripped = line.strip()
+            if not stripped and not started:
+                continue
+            if not started:
+                if is_valid_commit_message(stripped):
+                    message_lines.append(stripped)
+                    started = True
+                continue
+            message_lines.append(line.rstrip())
+        if message_lines:
+            return "\n".join(message_lines).strip()
+        for line in clean:
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#") and not stripped.startswith("//"):
+                return stripped
+        return None
 
 
 def check_ai_availability() -> bool:

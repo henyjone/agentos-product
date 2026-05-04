@@ -66,5 +66,5 @@ def format_commit_message(type_key: str, scope: Optional[str], description: str)
 
 
 def is_valid_commit_message(message: str) -> bool:
-    return bool(COMMIT_MESSAGE_PATTERN.match(message.strip()))
-
+    subject = message.strip().splitlines()[0].strip() if message.strip() else ""
+    return bool(COMMIT_MESSAGE_PATTERN.match(subject))

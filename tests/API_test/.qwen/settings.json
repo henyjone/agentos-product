@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(D:\\pro\\agentos-product\\docs\\HGZ个人文档/**)",
+      "Read(D:\\pro\\agentos-product\\src\\commit_guide/**)",
+      "Bash(python *)"
+    ]
+  },
+  "$version": 3
+}

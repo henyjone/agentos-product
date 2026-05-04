@@ -1,0 +1,35 @@
+{
+    "models": {
+        "chat_qwen3.5push": {
+            "模型描述": "对话模型qwen",
+            "api_key": "",
+            "api_base": "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+            "model": "qwen3.5-plus"
+        },
+        "chat_qwen": {
+            "模型描述": "对话模型qwen",
+            "api_key": "",
+            "api_base": "https://api.siliconflow.cn/v1/chat/completions",
+            "model": "Qwen/Qwen3-VL-32B-Thinking"
+        },
+        "chat_glm": {
+            "模型描述": "对话模型glm",
+            "api_key": "",
+            "api_base": "https://open.bigmodel.cn/api/paas/v4",
+            "model": "GLM-4.7-Flash"
+        },
+        "reordering": {
+            "模型描述": "重排序模型",
+            "api_key": "",
+            "api_base": "https://api.siliconflow.cn/v1/chat/completions",
+            "model": "BAAI/bge-reranker-v2-m3"
+        },
+        "embedding": {
+            "模型描述": "嵌入模型",
+            "api_key": "",
+            "api_base": "https://api.siliconflow.cn/v1/chat/completions",
+            "model": "baai/bge-m3"
+        }
+    },
+    "default_chat_model": "chat_glm"
+}

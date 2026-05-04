@@ -4,6 +4,27 @@ from pathlib import Path
 from typing import List, Optional
 
 
+_CODE_EXTENSIONS = {
+    ".py",
+    ".js",
+    ".ts",
+    ".tsx",
+    ".jsx",
+    ".java",
+    ".go",
+    ".rs",
+    ".cpp",
+    ".c",
+    ".h",
+    ".cs",
+    ".sql",
+    ".json",
+    ".yaml",
+    ".yml",
+    ".toml",
+}
+
+
 @dataclass(frozen=True)
 class GitStatus:
     repo_name: str
@@ -26,9 +47,11 @@ class CommitResult:
 
 def _run_git(args: List[str], path: str = ".") -> subprocess.CompletedProcess:
     return subprocess.run(
-        ["git"] + args,
+        ["git", "-c", "core.quotepath=false"] + args,
         cwd=path,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         shell=False,
@@ -83,16 +106,80 @@ def get_last_commit_sha(path: str = ".") -> Optional[str]:
     return result.stdout.strip()
 
 
-def get_staged_diff(path: str = ".", max_bytes: int = 8000) -> str:
-    """返回暂存区的 diff 文本，截断到 max_bytes 避免超出模型上下文。"""
-    result = _run_git(["diff", "--cached", "--unified=3"], path)
-    if result.returncode != 0 or not result.stdout.strip():
+def get_staged_diff(path: str = ".", max_bytes: int = 24000) -> str:
+    """Build a balanced staged-change context for AI.
+
+    A single global diff truncates from the beginning. When many large docs are
+    staged before code files, the model never sees the code changes. This
+    context keeps the full file list/stat and includes bounded per-file snippets
+    with code files first.
+    """
+    files = _stdout_lines(_run_git(["diff", "--cached", "--name-only"], path))
+    if not files:
         return ""
-    diff = result.stdout
-    if len(diff.encode("utf-8")) > max_bytes:
-        diff = diff.encode("utf-8")[:max_bytes].decode("utf-8", errors="ignore")
-        diff += "\n... (diff truncated)"
-    return diff
+
+    stat = _run_git(["diff", "--cached", "--stat"], path).stdout.strip()
+    numstat = _run_git(["diff", "--cached", "--numstat"], path).stdout.strip()
+    ordered_files = sorted(files, key=_file_priority)
+
+    sections = [
+        "## Staged files",
+        "\n".join("- {0}".format(item) for item in files),
+        "",
+        "## Change stat",
+        stat,
+        "",
+        "## Numstat",
+        numstat,
+        "",
+        "## Selected per-file diff snippets",
+    ]
+
+    header_bytes = len("\n".join(sections).encode("utf-8"))
+    remaining = max(4000, max_bytes - header_bytes)
+    per_file_budget = max(900, remaining // max(len(ordered_files), 1))
+
+    for file_path in ordered_files:
+        diff_result = _run_git(
+            ["diff", "--cached", "--unified=2", "--", file_path],
+            path,
+        )
+        snippet = diff_result.stdout.strip()
+        if not snippet:
+            continue
+        snippet = _truncate_bytes(snippet, per_file_budget)
+        sections.extend(
+            [
+                "",
+                "### {0}".format(file_path),
+                snippet,
+            ]
+        )
+
+    context = "\n".join(sections).strip()
+    return _truncate_bytes(context, max_bytes)
+
+
+def _file_priority(file_path: str) -> tuple:
+    path = Path(file_path)
+    suffix = path.suffix.lower()
+    normalized = file_path.replace("\\", "/").lower()
+    if suffix in _CODE_EXTENSIONS and "/tests/" not in normalized:
+        group = 0
+    elif "/tests/" in normalized or normalized.startswith("tests/"):
+        group = 1
+    elif suffix in {".md", ".rst", ".txt"} or normalized.startswith("docs/"):
+        group = 3
+    else:
+        group = 2
+    return (group, file_path)
+
+
+def _truncate_bytes(text: str, max_bytes: int) -> str:
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return text
+    return encoded[:max_bytes].decode("utf-8", errors="ignore") + "\n... (truncated)"
 
 
 def execute_commit(message: str, path: str = ".") -> CommitResult:
@@ -106,4 +193,3 @@ def execute_push(path: str = ".") -> bool:
     """推送当前分支到远程。返回是否成功。"""
     result = _run_git(["push"], path)
     return result.returncode == 0
-
