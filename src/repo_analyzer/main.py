@@ -63,6 +63,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--branch", default=None, help="target branch; all-repos mode uses each repo default when omitted")
     parser.add_argument("--output", "-o", default=None, help="write Markdown report to file")
     parser.add_argument("--no-ai", action="store_true", help="skip AI analysis")
+    parser.add_argument("--ai-timeout", type=int, default=None, help="AI request timeout seconds; default is 300")
     parser.add_argument("--no-code-context", action="store_true", help="skip commit file/stat/patch detail fetching")
     parser.add_argument("--code-commit-limit", type=int, default=10, help="maximum commits per repository to fetch code details for")
     parser.add_argument("--max-files-per-commit", type=int, default=12, help="maximum changed files to show per repository")
@@ -96,6 +97,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("max-files-per-commit must be greater than 0")
     if getattr(args, "max_patch_chars", 1200) < 0:
         raise ValueError("max-patch-chars must not be negative")
+    if getattr(args, "ai_timeout", None) is not None and args.ai_timeout < 1:
+        raise ValueError("ai-timeout must be greater than 0")
     if getattr(args, "history_limit", 5) < 0:
         raise ValueError("history-limit must not be negative")
     if getattr(args, "max_file_snapshots", 8) < 0:
@@ -256,7 +259,7 @@ def _run_single_repo_report(args: argparse.Namespace) -> str:
         return build_raw_report(classified, raw_data, errors, args)
 
     try:
-        model_config = get_default_model_config()
+        model_config = _get_model_config(args)
         context = build_analysis_context(classified, raw_data, args)
         analysis = run_ai_analysis(context, model_config)
         return format_ai_report(analysis, classified, raw_data, errors, args)
@@ -295,7 +298,7 @@ def _run_detail_report(args: argparse.Namespace) -> str:
         return build_detail_raw_report(filtered, classified, args)
 
     try:
-        model_config = get_default_model_config()
+        model_config = _get_model_config(args)
         context = build_detail_worklog_context(filtered, classified, args)
         analysis = run_detail_worklog_analysis(context, model_config)
         return format_detail_ai_report(analysis, filtered, classified, args)
@@ -313,7 +316,7 @@ def _run_manager_report(args: argparse.Namespace) -> str:
         report = build_manager_raw_report(activities, employees, args)
     else:
         try:
-            model_config = get_default_model_config()
+            model_config = _get_model_config(args)
             context = build_manager_work_summary_context(activities, employees, args)
             summary = run_work_summary_analysis(context, model_config)
             report = format_manager_work_summary_report(summary, activities, args)
@@ -349,6 +352,13 @@ def _fetch_file_snapshots(repo_url: str, raw_data: Dict, args: argparse.Namespac
             errors.append("file_content {0}@{1}: {2}".format(path, str(commit_ref)[:8], exc))
             snapshots.append({"path": path, "ref": commit_ref, "error": str(exc)})
     return snapshots, errors
+
+
+def _get_model_config(args: argparse.Namespace) -> Dict:
+    model_config = dict(get_default_model_config())
+    if getattr(args, "ai_timeout", None) is not None:
+        model_config["timeout"] = args.ai_timeout
+    return model_config
 
 
 def _fetch_repo_sources(

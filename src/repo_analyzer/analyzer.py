@@ -1,4 +1,5 @@
 import json
+import os
 from dataclasses import dataclass
 from typing import Dict, List
 
@@ -7,6 +8,10 @@ import requests
 
 class AIAnalysisError(Exception):
     """Raised when AI analysis cannot produce a valid result."""
+
+
+DEFAULT_AI_TIMEOUT_SECONDS = 300
+AI_TIMEOUT_ENV = "REPO_ANALYZER_AI_TIMEOUT_SECONDS"
 
 
 SYSTEM_PROMPT = """你是一个专业的软件项目管理分析助手。
@@ -111,6 +116,7 @@ class AIAnalyzer:
         self.api_base = model_config["api_base"]
         self.api_key = model_config["api_key"]
         self.model = model_config["model"]
+        self.timeout = _resolve_timeout(model_config)
 
     def analyze(self, context: str) -> AnalysisResult:
         raw = self._call_api(
@@ -140,20 +146,25 @@ class AIAnalyzer:
         return self._parse_response(raw)
 
     def _call_api(self, messages: List[Dict]) -> str:
-        response = requests.post(
-            self.api_base,
-            headers={
-                "Authorization": "Bearer {0}".format(self.api_key),
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": self.model,
-                "messages": messages,
-                "max_tokens": 4096,
-                "temperature": 0.4,
-            },
-            timeout=60,
-        )
+        try:
+            response = requests.post(
+                self.api_base,
+                headers={
+                    "Authorization": "Bearer {0}".format(self.api_key),
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": self.model,
+                    "messages": messages,
+                    "max_tokens": 4096,
+                    "temperature": 0.4,
+                },
+                timeout=self.timeout,
+            )
+        except requests.Timeout as exc:
+            raise AIAnalysisError("AI API request timed out after {0} seconds".format(self.timeout)) from exc
+        except requests.RequestException as exc:
+            raise AIAnalysisError("AI API request failed: {0}".format(exc)) from exc
         if response.status_code != 200:
             raise AIAnalysisError(
                 "AI API returned error: {0} {1}".format(response.status_code, response.text[:200])
@@ -218,3 +229,14 @@ def run_work_summary_analysis(context: str, model_config: Dict) -> WorkSummaryRe
 
 def run_detail_worklog_analysis(context: str, model_config: Dict) -> AnalysisResult:
     return AIAnalyzer(model_config).analyze_detail_worklog(context)
+
+
+def _resolve_timeout(model_config: Dict) -> int:
+    value = model_config.get("timeout") or model_config.get("timeout_seconds") or os.environ.get(AI_TIMEOUT_ENV)
+    if value is None:
+        return DEFAULT_AI_TIMEOUT_SECONDS
+    try:
+        timeout = int(value)
+    except (TypeError, ValueError):
+        return DEFAULT_AI_TIMEOUT_SECONDS
+    return timeout if timeout > 0 else DEFAULT_AI_TIMEOUT_SECONDS

@@ -1,12 +1,15 @@
 """commit-guide v2.0 —— AI 读取 diff，自动生成 commit message。"""
 
 import argparse
+import os
 import sys
-from typing import Callable, Optional
+from pathlib import Path
+from typing import Callable, List, Optional
 
 from .ai_assist import CommitMessageGenerator
 from .git_utils import (
     check_git_available,
+    execute_add,
     execute_commit,
     execute_push,
     get_remotes,
@@ -27,6 +30,7 @@ class SmartCommit:
         dry_run: bool = False,
         push: bool = False,
         push_target: Optional[str] = None,
+        add_patterns: Optional[List[str]] = None,
         input_func: Callable[[str], str] = input,
         output_func: Callable[[str], None] = print,
         generator: Optional[CommitMessageGenerator] = None,
@@ -36,6 +40,7 @@ class SmartCommit:
         self.dry_run = dry_run
         self.push = push
         self.push_target = push_target
+        self.add_patterns = add_patterns
         self.input = input_func
         self.output = output_func
         self.generator = generator if generator is not None else CommitMessageGenerator()
@@ -67,10 +72,18 @@ class SmartCommit:
         self.output("🌿 当前分支: {0}".format(status.branch))
         self.output("")
 
-        # 3. 暂存区为空 → 直接退出
+        # 3. 暂存区为空 → 尝试自动暂存，否则退出
         if not status.has_staged:
-            self.output("暂存区为空，请先执行 git add 暂存文件。")
-            return 1
+            if self.add_patterns:
+                if not self._auto_add(self.add_patterns):
+                    return 1
+                status = get_repo_status(self.path)
+                if not status.has_staged:
+                    self.output("git add 后暂存区仍为空，没有可提交的变更。")
+                    return 1
+            else:
+                self.output("暂存区为空，请先执行 git add 暂存文件，或使用 --add 自动暂存。")
+                return 1
 
         self.output("暂存区文件 ({0}):".format(len(status.staged)))
         for item in status.staged:
@@ -89,6 +102,18 @@ class SmartCommit:
 
         # 6. 预览与决策
         return self._preview_and_decide(message, status)
+
+    def _auto_add(self, patterns: List[str]) -> bool:
+        self.output("⏳ 自动暂存: {0}".format(" ".join(patterns)))
+        if self.dry_run:
+            self.output("[dry-run] 跳过 git add")
+            return True
+        ok, detail = execute_add(patterns, self.path)
+        if ok:
+            self.output("✓ 已暂存")
+        else:
+            self.output("✗ git add 失败: {0}".format(detail or "未知错误"))
+        return ok
 
     def _try_generate(self, diff: str, staged_files: list) -> Optional[str]:
         """调用 AI 生成 commit message，失败返回 None。"""
@@ -249,18 +274,33 @@ def parse_args(argv: Optional[list] = None) -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true", help="预览模式，只生成不提交")
     parser.add_argument("--push", action="store_true", help="提交后自动推送")
     parser.add_argument("--push-target", default=None, help="指定推送 remote 名称，如 origin、github、gitea")
+    parser.add_argument(
+        "--add",
+        nargs="*",
+        metavar="PATH",
+        help="提交前自动 git add，不传路径时默认暂存 src/",
+    )
     parser.add_argument("-v", "--version", action="version", version="commit-guide 2.0.0")
     return parser.parse_args(argv)
 
 
 def main(argv: Optional[list] = None) -> int:
     args = parse_args(argv)
+    add_patterns: Optional[List[str]] = None
+    if args.add is not None:
+        if args.add:
+            add_patterns = args.add
+        else:
+            # 默认暂存 src/，路径相对于仓库根（main.py 的上上级目录）
+            repo_root = Path(__file__).resolve().parents[2]
+            add_patterns = [str(repo_root / "src")]
     app = SmartCommit(
         path=args.path,
         no_ai=args.no_ai,
         dry_run=args.dry_run,
         push=args.push,
         push_target=args.push_target,
+        add_patterns=add_patterns,
     )
     return app.run()
 

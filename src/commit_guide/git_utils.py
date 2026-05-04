@@ -189,6 +189,14 @@ def _truncate_bytes(text: str, max_bytes: int) -> str:
     return encoded[:max_bytes].decode("utf-8", errors="ignore") + "\n... (truncated)"
 
 
+def execute_add(patterns: List[str], path: str = ".") -> tuple:
+    """Stage files matching the given patterns. Returns (success, stderr_detail)."""
+    result = _run_git(["add", "--"] + patterns, path)
+    if result.returncode != 0:
+        return False, (result.stderr or result.stdout or "").strip()
+    return True, ""
+
+
 def execute_commit(message: str, path: str = ".") -> CommitResult:
     result = _run_git(["commit", "-m", message], path)
     if result.returncode != 0:
