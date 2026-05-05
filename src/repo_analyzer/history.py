@@ -1,3 +1,5 @@
+"""历史快照模块 —— 管理管理者日报的历史快照，支持趋势对比分析。"""
+
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,6 +13,7 @@ SCHEMA_VERSION = 1
 
 
 def resolve_history_dir(output_path: Optional[str], explicit_history_dir: Optional[str] = None) -> Path:
+    """解析历史快照目录路径，优先使用显式指定的目录，其次使用报告文件同级的 history 子目录。"""
     if explicit_history_dir:
         return Path(explicit_history_dir)
     if output_path:
@@ -19,6 +22,10 @@ def resolve_history_dir(output_path: Optional[str], explicit_history_dir: Option
 
 
 def load_history_snapshots(history_dir: Path, limit: int = 5) -> List[Dict]:
+    """从历史目录加载最近 limit 个快照，按文件名倒序（即时间倒序）排列。
+
+    只加载 schema_version 匹配的快照，损坏的 JSON 文件静默跳过。
+    """
     if limit <= 0 or not history_dir.exists():
         return []
     snapshots: List[Dict] = []
@@ -40,6 +47,7 @@ def build_history_snapshot(
     employees: List[EmployeeSummary],
     args,
 ) -> Dict:
+    """从当前扫描结果构建历史快照字典，用于保存和趋势对比。"""
     created_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     overview = build_manager_overview(activities)
     return {
@@ -65,10 +73,15 @@ def build_history_snapshot(
 
 
 def save_history_snapshot(history_dir: Path, snapshot: Dict, report: str) -> Path:
+    """将快照 JSON 和对应的 Markdown 报告保存到历史目录，文件名包含时间戳。
+
+    如果同名文件已存在，自动追加数字后缀避免覆盖。
+    """
     history_dir.mkdir(parents=True, exist_ok=True)
     stamp = _stamp(snapshot.get("created_at", ""))
     json_path = history_dir / "{0}.json".format(stamp)
     md_path = history_dir / "{0}.md".format(stamp)
+    # 避免同一秒内多次保存时文件名冲突
     counter = 2
     while json_path.exists() or md_path.exists():
         json_path = history_dir / "{0}-{1}.json".format(stamp, counter)
@@ -83,6 +96,7 @@ def save_history_snapshot(history_dir: Path, snapshot: Dict, report: str) -> Pat
 
 
 def build_history_context(history: List[Dict], current: Optional[Dict] = None) -> str:
+    """构建供 AI 分析的历史趋势上下文，包含与上次快照的差值和历史表格。"""
     if not history:
         return "- No previous snapshots."
     lines = ["Previous snapshots loaded: {0}".format(len(history))]
@@ -116,6 +130,7 @@ def build_history_context(history: List[Dict], current: Optional[Dict] = None) -
 
 
 def build_history_report(history: List[Dict], current: Optional[Dict] = None) -> str:
+    """构建中文历史趋势报告，用于 --no-ai 模式下的历史对比展示。"""
     if not history:
         return "- 没有加载到历史快照。"
     previous = history[0]
@@ -141,6 +156,7 @@ def build_history_report(history: List[Dict], current: Optional[Dict] = None) ->
 
 
 def _repo_snapshot(activity: RepositoryActivity, days: int) -> Dict:
+    """将单个仓库活动转换为快照字典，包含统计数据和风险信号。"""
     from .data_builder import compute_stats, identify_builtin_risks
 
     stats = compute_stats(activity.classified)
@@ -163,6 +179,7 @@ def _repo_snapshot(activity: RepositoryActivity, days: int) -> Dict:
 
 
 def _delta_lines(previous: Dict, current: Optional[Dict], chinese: bool = False) -> List[str]:
+    """计算当前快照与上次快照的差值，生成趋势对比行。"""
     if not current:
         return []
     previous_overview = previous.get("overview", {}) or {}
@@ -186,6 +203,7 @@ def _delta_lines(previous: Dict, current: Optional[Dict], chinese: bool = False)
 
 
 def _stamp(value: str) -> str:
+    """将 ISO 时间字符串转换为文件名安全的时间戳格式，如 20260505-083000。"""
     if value:
         return value.replace(":", "").replace("-", "").replace("+0000", "Z")[:15].replace("T", "-")
     return datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")

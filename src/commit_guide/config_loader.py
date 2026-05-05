@@ -1,3 +1,5 @@
+"""配置加载模块 —— 从项目根目录的 config.json 读取模型配置，支持多模型别名。"""
+
 import json
 import os
 from pathlib import Path
@@ -8,6 +10,11 @@ Config = Dict[str, Any]
 
 
 def find_project_root(start: Optional[Path] = None) -> Path:
+    """向上遍历目录树，找到包含 config.json 的项目根目录。
+
+    优先读取 PROJECT_ROOT 环境变量；未设置时从 start、cwd、__file__ 三个候选路径
+    向上最多搜索 8 层父目录。
+    """
     env_root = os.environ.get("PROJECT_ROOT")
     if env_root:
         root = Path(env_root).expanduser().resolve()
@@ -30,6 +37,11 @@ def find_project_root(start: Optional[Path] = None) -> Path:
 
 
 def load_config(root: Optional[Path] = None) -> Config:
+    """加载并校验 config.json，返回完整配置字典。
+
+    校验内容：models 字段非空、default_chat_model 存在于 models 中，
+    以及默认模型配置包含必要字段。
+    """
     project_root = root or find_project_root()
     config_path = project_root / "config.json"
     try:
@@ -49,6 +61,7 @@ def load_config(root: Optional[Path] = None) -> Config:
 
 
 def _validate_model_config(model_config: Dict[str, Any]) -> None:
+    """校验单个模型配置是否包含必要字段（api_base、api_key、model）。"""
     for key in ("api_base", "api_key", "model"):
         if not model_config.get(key):
             raise ValueError("model config missing required field: {0}".format(key))
@@ -57,6 +70,7 @@ def _validate_model_config(model_config: Dict[str, Any]) -> None:
 
 
 def get_model_config(alias: str, root: Optional[Path] = None) -> Dict[str, Any]:
+    """按别名获取指定模型的配置字典（副本）。"""
     config = load_config(root)
     try:
         model_config = config["models"][alias]
@@ -67,6 +81,7 @@ def get_model_config(alias: str, root: Optional[Path] = None) -> Dict[str, Any]:
 
 
 def get_default_model_config(root: Optional[Path] = None) -> Dict[str, Any]:
+    """获取 default_chat_model 指向的模型配置字典（副本）。"""
     config = load_config(root)
     default_alias = config["default_chat_model"]
     model_config = config["models"][default_alias]

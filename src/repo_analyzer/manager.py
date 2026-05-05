@@ -1,3 +1,5 @@
+"""管理者报告模块 —— 聚合多仓库活动数据，构建员工摘要、仓库概览和管理者日报。"""
+
 import re
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Set
@@ -12,30 +14,38 @@ from .rendering import escape_cell, format_counts
 
 @dataclass
 class RepositoryActivity:
+    """单个仓库的完整活动数据，包含原始 API 数据和分类后的提交列表。"""
+
     repo: RepoRef
     branch: str
-    raw_data: Dict[str, List[Dict]]
+    raw_data: Dict[str, List[Dict]]  # 包含 commits/issues/pull_requests/branches/commit_details/project_context
     classified: List[ClassifiedCommit]
-    errors: List[str] = field(default_factory=list)
+    errors: List[str] = field(default_factory=list)  # 数据拉取过程中的非致命错误
 
 
 @dataclass
 class EmployeeSummary:
-    identity: str
+    """单个员工跨仓库的活动聚合摘要。"""
+
+    identity: str                                          # 员工标识（login/email/name）
     commits: int = 0
     open_issues: int = 0
     open_prs: int = 0
-    commit_types: Dict[str, int] = field(default_factory=dict)
-    repos: Set[str] = field(default_factory=set)
-    samples: List[str] = field(default_factory=list)
+    commit_types: Dict[str, int] = field(default_factory=dict)  # 按 Conventional Commit 类型统计
+    repos: Set[str] = field(default_factory=set)                # 涉及的仓库集合
+    samples: List[str] = field(default_factory=list)            # 最多 5 条提交样例
     code_files: int = 0
     additions: int = 0
     deletions: int = 0
     code_categories: Dict[str, int] = field(default_factory=dict)
-    latest_activity: str = ""
+    latest_activity: str = ""                                    # 最近活动时间（ISO 字符串）
 
 
 def build_employee_summaries(activities: Iterable[RepositoryActivity]) -> List[EmployeeSummary]:
+    """遍历所有仓库活动，按员工标识聚合提交、Issue、PR 和代码变更统计。
+
+    结果按活动量（commits + issues + prs）倒序排列。
+    """
     summaries: Dict[str, EmployeeSummary] = {}
     for activity in activities:
         repo_name = _repo_name(activity.repo)
@@ -83,6 +93,7 @@ def build_employee_summaries(activities: Iterable[RepositoryActivity]) -> List[E
 
 
 def build_manager_overview(activities: List[RepositoryActivity]) -> Dict[str, int]:
+    """计算所有仓库的汇总统计数据，用于报告头部概览。"""
     return {
         "repo_count": len(activities),
         "repos_with_commits": sum(1 for item in activities if item.classified),
@@ -100,6 +111,7 @@ def build_manager_analysis_context(
     args,
     history_context: str = "",
 ) -> str:
+    """构建供 AI 生成管理者日报的完整上下文，包含员工任务简报、项目简报、代码变更证据和历史趋势。"""
     overview = build_manager_overview(activities)
     lines = [
         "# Gitea manager daily context",
@@ -150,6 +162,7 @@ def build_manager_raw_report(
     args,
     history_report: str = "",
 ) -> str:
+    """构建不依赖 AI 的管理者日报，只包含员工工作摘要和数据拉取警告。"""
     overview = build_manager_overview(activities)
     lines = [
         "# Gitea 工作日报",
@@ -202,6 +215,7 @@ def build_manager_work_summary_context(
     employees: List[EmployeeSummary],
     args,
 ) -> str:
+    """构建供 AI 生成员工工作摘要的精简上下文，只包含员工证据和项目文档，不含风险和建议。"""
     overview = build_manager_overview(activities)
     lines = [
         "# Employee work summary context",
@@ -243,6 +257,7 @@ def format_manager_work_summary_report(
     activities: List[RepositoryActivity],
     args,
 ) -> str:
+    """将 AI 工作摘要结果格式化为管理者日报 Markdown，按员工分组展示完成工作。"""
     overview = build_manager_overview(activities)
     lines = [
         "# Gitea 工作日报",
@@ -272,6 +287,7 @@ def format_manager_work_summary_report(
 
 
 def _summary_for(summaries: Dict[str, EmployeeSummary], actor: str) -> EmployeeSummary:
+    """获取或创建指定员工的 EmployeeSummary，actor 为空时使用 "unknown"。"""
     key = actor or "unknown"
     if key not in summaries:
         summaries[key] = EmployeeSummary(identity=key)
@@ -279,6 +295,7 @@ def _summary_for(summaries: Dict[str, EmployeeSummary], actor: str) -> EmployeeS
 
 
 def _commit_actor(raw: Dict, commit: ClassifiedCommit) -> str:
+    """从原始 commit 字典中提取员工标识，优先使用 API 返回的 author 对象。"""
     api_author = raw.get("author")
     if isinstance(api_author, dict):
         actor = _user_actor(api_author)
@@ -562,6 +579,7 @@ def _commit_sha(item: Dict) -> str:
 
 
 def _add_code_summary(employee: EmployeeSummary, detail: Dict) -> None:
+    """将单个 commit 的代码变更统计累加到员工摘要中。"""
     summary = summarize_code_changes([detail], max_patch_chars=0)
     employee.code_files += summary.file_count
     employee.additions += summary.additions

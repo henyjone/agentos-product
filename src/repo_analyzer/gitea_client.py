@@ -1,3 +1,5 @@
+"""Gitea API 客户端模块 —— 封装 Gitea REST API 调用，提供提交、Issue、PR、文件内容等数据获取功能。"""
+
 import time
 import base64
 from dataclasses import dataclass
@@ -8,36 +10,42 @@ import requests
 
 
 class GiteaError(Exception):
-    """Base exception for Gitea API errors."""
+    """Gitea API 相关错误的基类。"""
 
 
 class AuthError(GiteaError):
-    """Authentication or authorization failure."""
+    """认证或授权失败（401/403）。"""
 
 
 class ResourceNotFoundError(GiteaError):
-    """Requested resource does not exist or is inaccessible."""
+    """请求的资源不存在或无权访问（404）。"""
 
 
 class APIError(GiteaError):
-    """Non-retryable API error."""
+    """不可重试的 API 错误。"""
 
 
 class NetworkError(GiteaError):
-    """Network-level error after retries."""
+    """网络层错误，重试后仍失败。"""
 
 
 @dataclass(frozen=True)
 class RepoRef:
-    base_url: str
-    owner: str
-    repo: str
-    full_name: str = ""
-    html_url: str = ""
+    """仓库引用，包含访问仓库所需的所有坐标信息。"""
+
+    base_url: str        # Gitea 实例的 base URL，如 https://gitea.example.com
+    owner: str           # 仓库所有者（用户名或组织名）
+    repo: str            # 仓库名称
+    full_name: str = ""  # owner/repo 格式的完整名称
+    html_url: str = ""   # 仓库的 HTML 页面 URL
     default_branch: str = ""
 
 
 def parse_repo_url(url: str) -> RepoRef:
+    """从仓库 URL 解析出 RepoRef，支持 http/https 协议。
+
+    URL 格式：https://gitea.example.com/[prefix/]owner/repo[.git]
+    """
     parsed = urlparse(url.rstrip("/"))
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         raise ValueError("repo-url 必须是 http/https URL")
@@ -65,10 +73,12 @@ def parse_repo_url(url: str) -> RepoRef:
 
 
 def repo_ref_from_api(base_url: str, item: Dict) -> RepoRef:
+    """从 Gitea API 返回的仓库对象构建 RepoRef。"""
     owner_data = item.get("owner", {}) or {}
     full_name = item.get("full_name") or ""
     owner = owner_data.get("login") or owner_data.get("username") or ""
     repo = item.get("name") or ""
+    # full_name 可能包含 owner/repo，作为 owner/repo 字段的 fallback
     if (not owner or not repo) and "/" in full_name:
         owner, repo = full_name.split("/", 1)
     if not owner or not repo:
@@ -84,7 +94,7 @@ def repo_ref_from_api(base_url: str, item: Dict) -> RepoRef:
 
 
 class GiteaClient:
-    """Read-only Gitea API client."""
+    """只读 Gitea API 客户端，内置重试和错误分类逻辑。"""
 
     def __init__(self, base_url: str, token: str, session: Optional[requests.Session] = None):
         self.base_url = base_url.rstrip("/")
@@ -105,6 +115,7 @@ class GiteaClient:
         path: str,
         params: Optional[Dict] = None,
     ):
+        """执行单次 API 请求，自动重试超时和 5xx 错误，分类处理 4xx 错误。"""
         url = "{0}/api/v1{1}".format(self.base_url, path)
         for attempt in range(self.max_retries):
             try:
@@ -116,7 +127,7 @@ class GiteaClient:
                 )
             except requests.Timeout as exc:
                 if attempt < self.max_retries - 1:
-                    time.sleep(2 ** attempt)
+                    time.sleep(2 ** attempt)  # 指数退避
                     continue
                 raise NetworkError("请求超时") from exc
             except requests.ConnectionError as exc:
@@ -144,6 +155,7 @@ class GiteaClient:
         raise NetworkError("请求失败")
 
     def _paginate(self, path: str, params: Optional[Dict] = None) -> List[Dict]:
+        """自动翻页获取所有结果，每页 50 条，直到返回空列表或非列表响应。"""
         items: List[Dict] = []
         page = 1
         per_page = 50
@@ -174,6 +186,7 @@ def fetch_commits(
     max_count: int = 50,
     include_code: bool = False,
 ) -> List[Dict]:
+    """获取指定分支在 since 时间之后的提交列表，可选包含文件变更统计。"""
     path = "/repos/{0}/{1}/commits".format(owner, repo)
     params = {"sha": branch, "since": since, "limit": max_count}
     if include_code:
@@ -191,6 +204,7 @@ def fetch_issues(
     repo: str,
     state: str = "open",
 ) -> List[Dict]:
+    """获取仓库的 Issue 列表，自动过滤掉 PR（Gitea API 中 Issue 和 PR 共用同一接口）。"""
     path = "/repos/{0}/{1}/issues".format(owner, repo)
     issues = client._paginate(path, {"state": state})
     return [
@@ -206,11 +220,13 @@ def fetch_pull_requests(
     repo: str,
     state: str = "open",
 ) -> List[Dict]:
+    """获取仓库的 Pull Request 列表。"""
     path = "/repos/{0}/{1}/pulls".format(owner, repo)
     return client._paginate(path, {"state": state})
 
 
 def fetch_branches(client: GiteaClient, owner: str, repo: str) -> List[Dict]:
+    """获取仓库的所有分支列表。"""
     path = "/repos/{0}/{1}/branches".format(owner, repo)
     return client._paginate(path)
 
@@ -222,6 +238,7 @@ def fetch_commit_detail(
     sha: str,
     include_code: bool = True,
 ) -> Dict:
+    """获取单个提交的详细信息，可选包含文件变更和 patch 内容。"""
     path = "/repos/{0}/{1}/git/commits/{2}".format(owner, repo, sha)
     params = {}
     if include_code:
@@ -240,6 +257,8 @@ def fetch_file_content(
     filepath: str,
     ref: Optional[str] = None,
 ) -> Dict:
+    """获取仓库中指定文件的内容，自动解码 base64 编码的内容。"""
+    # URL 编码文件路径，保留 / 分隔符
     quoted_path = quote(filepath.replace("\\", "/"), safe="/")
     path = "/repos/{0}/{1}/contents/{2}".format(owner, repo, quoted_path)
     params = {"ref": ref} if ref else None
@@ -253,6 +272,7 @@ def fetch_file_content(
 
 
 def decode_content_payload(payload: Dict) -> Optional[str]:
+    """解码 Gitea API 返回的 base64 编码文件内容，非文本文件返回 None。"""
     raw = payload.get("content")
     if not raw or payload.get("type") not in (None, "file"):
         return None
@@ -273,6 +293,7 @@ def list_repositories(
     query: str = "",
     limit: Optional[int] = None,
 ) -> List[RepoRef]:
+    """搜索并列出当前 token 可见的所有仓库，支持关键词过滤和数量限制。"""
     repos: List[RepoRef] = []
     page = 1
     per_page = 50
@@ -281,6 +302,7 @@ def list_repositories(
         if query:
             params["q"] = query
         response = client._request("GET", "/repos/search", params)
+        # Gitea /repos/search 返回 {"data": [...], "total_count": N} 格式
         if isinstance(response, dict):
             items = response.get("data") or []
             total_count = response.get("total_count")

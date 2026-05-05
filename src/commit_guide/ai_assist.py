@@ -8,6 +8,7 @@ import requests
 from .config_loader import get_default_model_config
 from .types import COMMIT_TYPE_KEYS, is_valid_commit_message
 
+# 系统提示词：要求 AI 综合所有暂存文件生成符合 Conventional Commit 规范的 message
 _SYSTEM_PROMPT = (
     "你是一个资深工程师，负责根据暂存区变更生成 Git commit message。"
     "你会收到 staged 文件清单、stat、numstat 和按文件截断后的 diff 片段。"
@@ -36,14 +37,20 @@ _SYSTEM_PROMPT = (
 
 @dataclass(frozen=True)
 class GenerateResult:
+    """AI 生成结果，包含成功标志、message 文本和失败原因。"""
+
     success: bool
-    message: str = ""
-    raw_response: str = ""
-    reason: str = ""
+    message: str = ""        # 提取并校验通过的 commit message
+    raw_response: str = ""   # AI 原始输出，用于调试
+    reason: str = ""         # 失败时的原因描述
 
 
 class CommitMessageGenerator:
-    """从 git diff 生成 commit message。"""
+    """从 git diff 生成 commit message 的 AI 客户端封装。
+
+    初始化时尝试加载模型配置；配置不可用时 is_available() 返回 False，
+    调用方可据此决定是否降级到手动编辑。
+    """
 
     def __init__(self, model_config: Optional[dict] = None) -> None:
         self.model_config = model_config
@@ -51,6 +58,7 @@ class CommitMessageGenerator:
         self._init_ai()
 
     def _init_ai(self) -> None:
+        """尝试加载模型配置，失败时将 available 置为 False 而非抛出异常。"""
         if self.model_config is not None:
             self.available = True
             return
@@ -62,9 +70,14 @@ class CommitMessageGenerator:
             self.available = False
 
     def is_available(self) -> bool:
+        """返回 AI 功能是否可用（配置加载成功）。"""
         return self.available
 
     def generate(self, diff: str, staged_files: List[str]) -> GenerateResult:
+        """调用 AI API，从 diff 文本生成 commit message。
+
+        返回 GenerateResult；success=False 时 reason 字段说明失败原因。
+        """
         if not self.available or not self.model_config:
             return GenerateResult(
                 success=False, reason="AI model config unavailable"
@@ -85,7 +98,7 @@ class CommitMessageGenerator:
                 {"role": "user", "content": diff},
             ],
             "max_tokens": 1024,
-            "temperature": 0.3,
+            "temperature": 0.3,  # 低温度减少随机性，保证格式稳定
         }
 
         try:
@@ -93,7 +106,7 @@ class CommitMessageGenerator:
                 self.model_config["api_base"],
                 headers=headers,
                 json=payload,
-                timeout=30,
+                timeout=int(self.model_config.get("timeout") or 600),
             )
         except Exception as exc:
             return GenerateResult(success=False, reason=str(exc))
@@ -157,6 +170,8 @@ class CommitMessageGenerator:
         """从 AI 原始输出中提取 commit message。
 
         处理 AI 可能包裹 ``` 代码块或添加多余说明的情况。
+        策略：先找第一行符合规范的 subject，再收集后续正文行；
+        找不到规范行时退化为返回第一个非注释行。
         """
         lines = raw.strip().split("\n")
         # 去掉 ``` 包裹行
@@ -170,6 +185,7 @@ class CommitMessageGenerator:
             if not stripped and not started:
                 continue
             if not started:
+                # 找到第一行符合规范的 subject 才开始收集
                 if is_valid_commit_message(stripped):
                     message_lines.append(stripped)
                     started = True
@@ -177,6 +193,7 @@ class CommitMessageGenerator:
             message_lines.append(line.rstrip())
         if message_lines:
             return "\n".join(message_lines).strip()
+        # 退化：返回第一个非注释行
         for line in clean:
             stripped = line.strip()
             if stripped and not stripped.startswith("#") and not stripped.startswith("//"):
@@ -185,4 +202,5 @@ class CommitMessageGenerator:
 
 
 def check_ai_availability() -> bool:
+    """快速检查 AI 功能是否可用（不发起网络请求）。"""
     return CommitMessageGenerator().is_available()

@@ -1,3 +1,5 @@
+"""详细工作日志模块 —— 支持按作者/路径/commit 过滤数据，构建详细工作日志上下文和报告。"""
+
 from typing import Dict, List, Optional
 
 from .analyzer import AnalysisResult
@@ -13,8 +15,13 @@ def filter_detail_data(
     path_filters: Optional[List[str]] = None,
     commit_filters: Optional[List[str]] = None,
 ) -> Dict:
+    """按作者、路径和 commit SHA 前缀过滤原始数据，返回过滤后的数据字典。
+
+    三个过滤条件均为 AND 关系；未指定的条件不过滤。
+    """
     path_filters = [item.lower().replace("\\", "/") for item in (path_filters or []) if item]
     commit_filters = [item.lower() for item in (commit_filters or []) if item]
+    # 建立 SHA → detail 的索引，用于快速查找
     details_by_sha = {_sha(item): item for item in raw_data.get("commit_details", []) if _sha(item)}
 
     filtered_commits = []
@@ -22,10 +29,13 @@ def filter_detail_data(
     for commit in raw_data.get("commits", []):
         sha = _sha(commit)
         detail = details_by_sha.get(sha)
+        # commit SHA 前缀过滤
         if commit_filters and not any(sha.startswith(value) for value in commit_filters):
             continue
+        # 作者过滤（大小写不敏感，匹配 login/username/email/name 等字段）
         if author and author.lower() not in _commit_actor_text(commit).lower():
             continue
+        # 路径过滤：commit detail 中至少有一个文件路径包含指定前缀
         if path_filters and not _detail_matches_paths(detail, path_filters):
             continue
         filtered_commits.append(commit)
@@ -43,6 +53,7 @@ def filter_detail_data(
 
 
 def build_detail_worklog_context(raw_data: Dict, classified: List[ClassifiedCommit], args) -> str:
+    """构建供 AI 生成详细工作日志的上下文文本，包含过滤范围、提交列表、代码证据和文件快照。"""
     lines = [
         "# Detailed work log context",
         "",
@@ -79,6 +90,7 @@ def build_detail_worklog_context(raw_data: Dict, classified: List[ClassifiedComm
 
 
 def build_detail_raw_report(raw_data: Dict, classified: List[ClassifiedCommit], args) -> str:
+    """构建不依赖 AI 的详细工作日志原始报告。"""
     return "\n".join(
         [
             "# 详细工作日志",
@@ -117,6 +129,7 @@ def build_detail_raw_report(raw_data: Dict, classified: List[ClassifiedCommit], 
 
 
 def format_detail_ai_report(analysis: AnalysisResult, raw_data: Dict, classified: List[ClassifiedCommit], args) -> str:
+    """将 AI 详细工作日志分析结果格式化为完整 Markdown 报告。"""
     return "\n".join(
         [
             "# 详细工作日志",
@@ -162,10 +175,12 @@ def format_detail_ai_report(analysis: AnalysisResult, raw_data: Dict, classified
 
 
 def classify_detail_commits(raw_data: Dict) -> List[ClassifiedCommit]:
+    """对过滤后的 raw_data 中的 commits 进行分类。"""
     return classify_commits(raw_data.get("commits", []))
 
 
 def collect_file_snapshot_targets(raw_data: Dict, max_files: int = 8) -> List[Dict]:
+    """从 commit_details 中收集需要获取文件内容快照的目标列表，去重并限制数量。"""
     targets: List[Dict] = []
     seen = set()
     for detail in raw_data.get("commit_details", []):
@@ -185,6 +200,7 @@ def collect_file_snapshot_targets(raw_data: Dict, max_files: int = 8) -> List[Di
 
 
 def build_file_snapshot_context(snapshots: List[Dict], max_chars: int = 2500) -> str:
+    """将文件内容快照列表格式化为 Markdown 代码块，供 AI 分析使用。"""
     if not snapshots:
         return "- No file content snapshots fetched."
     sections: List[str] = []
@@ -219,14 +235,17 @@ def _format_commit(commit: ClassifiedCommit) -> str:
 
 
 def _sha(item: Dict) -> str:
+    """提取 commit 的 SHA 前 8 位（小写），兼容 sha 和 id 字段名。"""
     return str(item.get("sha") or item.get("id") or "")[:8].lower()
 
 
 def _sha_full(item: Dict) -> str:
+    """提取 commit 的完整 SHA。"""
     return str(item.get("sha") or item.get("id") or "")
 
 
 def _filename(file_item: Dict) -> str:
+    """从文件变更字典中提取文件路径，兼容多种字段名。"""
     return (
         file_item.get("filename")
         or file_item.get("name")
@@ -236,6 +255,7 @@ def _filename(file_item: Dict) -> str:
 
 
 def _commit_actor_text(commit: Dict) -> str:
+    """拼接 commit 中所有可能的作者标识字段，用于作者过滤的字符串匹配。"""
     parts = []
     api_author = commit.get("author")
     if isinstance(api_author, dict):
@@ -246,6 +266,7 @@ def _commit_actor_text(commit: Dict) -> str:
 
 
 def _detail_matches_paths(detail: Optional[Dict], path_filters: List[str]) -> bool:
+    """判断 commit detail 中是否有任意文件路径包含指定的路径过滤词。"""
     if not detail:
         return False
     for file_item in detail.get("files", []) or []:
@@ -261,6 +282,7 @@ def _detail_matches_paths(detail: Optional[Dict], path_filters: List[str]) -> bo
 
 
 def _truncate(text: str, max_chars: int) -> str:
+    """截断文本到指定字符数，超出时追加截断提示。"""
     if max_chars <= 0:
         return ""
     if len(text) <= max_chars:

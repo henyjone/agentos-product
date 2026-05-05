@@ -1,3 +1,5 @@
+"""报告输出模块 —— 将 AI 分析结果或原始数据格式化为 Markdown 报告，并写入文件或打印到终端。"""
+
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -15,6 +17,7 @@ def format_ai_report(
     errors: List[str],
     args,
 ) -> str:
+    """将 AI 分析结果格式化为完整的 Markdown 报告，包含摘要、事实、推断、风险和建议。"""
     stats = compute_stats(classified)
     code_summary = summarize_code_changes(raw_data.get("commit_details", []))
     lines = [
@@ -69,6 +72,7 @@ def build_raw_report(
     errors: List[str],
     args,
 ) -> str:
+    """构建不依赖 AI 的原始数据摘要报告，包含提交统计、Issue/PR 列表和内置风险信号。"""
     stats = compute_stats(classified)
     risks = identify_builtin_risks(classified, raw_data, getattr(args, "days", 7))
     code_summary = summarize_code_changes(raw_data.get("commit_details", []))
@@ -149,6 +153,7 @@ def build_raw_report(
 
 
 def render_report(report: str, output_path: Optional[str]) -> None:
+    """将报告写入文件（如果指定了路径）或打印到标准输出。"""
     if output_path:
         Path(output_path).write_text(report, encoding="utf-8")
         print("报告已保存到: {0}".format(output_path))
@@ -157,6 +162,7 @@ def render_report(report: str, output_path: Optional[str]) -> None:
 
 
 def _single_code_summary(summary) -> str:
+    """将 CodeChangeSummary 格式化为简洁的 Markdown 列表。"""
     return "\n".join(
         [
             "- Commit 明细: {0}".format(summary.commit_count),

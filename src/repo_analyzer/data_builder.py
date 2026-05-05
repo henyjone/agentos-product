@@ -1,3 +1,5 @@
+"""数据构建模块 —— 对 commit 列表进行分类统计、风险识别，并构建供 AI 分析的上下文文本。"""
+
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -7,7 +9,9 @@ from .code_context import build_code_change_context
 from .project_context import build_project_context_section
 
 
+# 支持的 Conventional Commit 类型
 COMMIT_TYPES = ("feat", "fix", "refactor", "docs", "test", "chore", "perf", "revert")
+# 匹配 Conventional Commit 格式的正则：type(scope): description
 COMMIT_PATTERN = re.compile(
     r"^(feat|fix|refactor|docs|test|chore|perf|revert)(\([^)]+\))?:\s*(.+)$"
 )
@@ -15,31 +19,41 @@ COMMIT_PATTERN = re.compile(
 
 @dataclass(frozen=True)
 class ClassifiedCommit:
+    """经过分类的提交记录，包含解析后的 type、scope 和描述。"""
+
     sha: str
-    full_message: str
-    type: str
+    full_message: str   # 提交信息第一行（原始）
+    type: str           # 提交类型，不符合规范时为 "uncategorized"
     scope: Optional[str]
-    description: str
+    description: str    # 去除 type(scope): 前缀后的描述文本
     author: str
     date: str
 
 
 @dataclass(frozen=True)
 class CommitStats:
+    """提交统计数据，包含总数、按类型分布和格式规范率。"""
+
     total: int
     by_type: Dict[str, int]
     uncategorized: int
-    format_compliance_rate: float
+    format_compliance_rate: float  # 符合 Conventional Commit 格式的比例
 
 
 @dataclass(frozen=True)
 class RiskSignal:
-    signal: str
-    basis: str
-    severity: str
+    """内置风险信号，由规则引擎识别。"""
+
+    signal: str   # 风险名称
+    basis: str    # 风险依据（具体数据）
+    severity: str # 严重程度：high / medium / low
 
 
 def classify_commits(raw_commits: List[Dict]) -> List[ClassifiedCommit]:
+    """将 Gitea API 返回的原始 commit 列表解析为 ClassifiedCommit 列表。
+
+    不符合 Conventional Commit 格式的提交归类为 uncategorized。
+    """
     classified: List[ClassifiedCommit] = []
     for item in raw_commits:
         commit = item.get("commit", {}) or {}
@@ -76,6 +90,7 @@ def classify_commits(raw_commits: List[Dict]) -> List[ClassifiedCommit]:
 
 
 def compute_stats(classified: List[ClassifiedCommit]) -> CommitStats:
+    """计算提交统计数据，包括按类型分布和格式规范率。"""
     by_type = {commit_type: 0 for commit_type in COMMIT_TYPES}
     uncategorized = 0
     for commit in classified:
@@ -99,6 +114,7 @@ def identify_builtin_risks(
     days: int,
     now: Optional[datetime] = None,
 ) -> List[RiskSignal]:
+    """基于规则识别内置风险信号，包括无活动、Issue 积压、分支过多、格式规范率低等。"""
     now = now or datetime.now(timezone.utc)
     stats = compute_stats(classified)
     risks: List[RiskSignal] = []
@@ -121,6 +137,7 @@ def identify_builtin_risks(
             )
         )
 
+    # 检查长期未关闭的 Issue（超过 30 天）
     for issue in issues:
         created_at = _parse_datetime(issue.get("created_at"))
         if created_at and (now - created_at).days > 30:
@@ -132,6 +149,7 @@ def identify_builtin_risks(
                 )
             )
 
+    # 检查长期未合并的 PR（超过 7 天）
     for pr in prs:
         created_at = _parse_datetime(pr.get("created_at"))
         if created_at and (now - created_at).days > 7:
@@ -146,6 +164,7 @@ def identify_builtin_risks(
 
 
 def build_analysis_context(classified: List[ClassifiedCommit], raw_data: Dict, args) -> str:
+    """构建供 AI 分析的完整上下文文本，包含项目信息、提交统计、Issue/PR/分支列表和代码变更证据。"""
     stats = compute_stats(classified)
     risks = identify_builtin_risks(classified, raw_data, getattr(args, "days", 7))
     max_commits = getattr(args, "max_commits", 50)
@@ -195,6 +214,7 @@ def build_analysis_context(classified: List[ClassifiedCommit], raw_data: Dict, a
 
 
 def _type_table(stats: CommitStats) -> str:
+    """生成 commit 类型分布的 Markdown 表格。"""
     lines = ["| Type | 数量 |", "|---|---:|"]
     for commit_type in COMMIT_TYPES:
         if stats.by_type.get(commit_type):
@@ -237,6 +257,7 @@ def _format_branch(item: Dict) -> str:
 
 
 def _parse_datetime(value: Optional[str]) -> Optional[datetime]:
+    """解析 ISO 8601 时间字符串，自动处理 Z 后缀和无时区信息的情况。"""
     if not value:
         return None
     text = value.replace("Z", "+00:00")
@@ -250,6 +271,7 @@ def _parse_datetime(value: Optional[str]) -> Optional[datetime]:
 
 
 def _truncate(text: str, max_chars: int) -> str:
+    """截断文本到指定字符数，超出时追加截断提示。"""
     if len(text) <= max_chars:
         return text
     return text[:max_chars] + "\n... (context truncated)"

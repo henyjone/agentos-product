@@ -1,11 +1,19 @@
+"""repo-analyzer v1.2.0 —— 管理者侧 Gitea 仓库分析工具，支持单仓库、详细工作日志和多仓库管理者日报三种模式。"""
+
 import argparse
 import logging
 import os
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
+
+from org_memory.domain import IngestResult
+from org_memory.extraction import RuleFactExtractor
+from org_memory.ingest import build_gitea_ingest_result
+from org_memory.store import LocalSQLiteMemoryStore, apply_ingest_result
 
 from .analyzer import AIAnalysisError, run_ai_analysis, run_detail_worklog_analysis, run_work_summary_analysis
 from .config_loader import get_default_model_config
@@ -47,6 +55,7 @@ from .project_context import fetch_project_context_documents
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
+    """解析 CLI 参数，返回 Namespace 对象。支持单仓库、详细日志和多仓库三种运行模式。"""
     parser = argparse.ArgumentParser(description="Gitea repository analyzer")
     parser.add_argument("--repo-url", help="single Gitea repository URL")
     parser.add_argument("--base-url", help="Gitea base URL, for --all-repos")
@@ -62,6 +71,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--days", type=int, default=7, help="analyze recent N days")
     parser.add_argument("--branch", default=None, help="target branch; all-repos mode uses each repo default when omitted")
     parser.add_argument("--output", "-o", default=None, help="write Markdown report to file")
+    parser.add_argument("--write-memory", action="store_true", help="write scanned evidence into org_memory SQLite store")
+    parser.add_argument("--memory-db", default=None, help="org_memory SQLite path; default is data/org_memory.sqlite")
     parser.add_argument("--no-ai", action="store_true", help="skip AI analysis")
     parser.add_argument("--ai-timeout", type=int, default=None, help="AI request timeout seconds; default is 300")
     parser.add_argument("--no-code-context", action="store_true", help="skip commit file/stat/patch detail fetching")
@@ -81,6 +92,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
 
 
 def validate_args(args: argparse.Namespace) -> None:
+    """校验 CLI 参数的合法性，不合法时抛出 ValueError。"""
     if not os.environ.get("GITEA_TOKEN"):
         raise ValueError("environment variable GITEA_TOKEN is required")
     if args.days < 1:
@@ -133,6 +145,7 @@ def fetch_all_data(
     include_code: bool = True,
     code_commit_limit: Optional[int] = None,
 ) -> Tuple[Dict, List[str]]:
+    """获取单个仓库的所有数据（提交、Issue、PR、分支、项目文档），返回 (raw_data, errors)。"""
     ref = parse_repo_url(repo_url)
     token = os.environ["GITEA_TOKEN"]
     client = GiteaClient(ref.base_url, token)
@@ -152,6 +165,10 @@ def fetch_all_data(
 
 
 def fetch_manager_activities(args: argparse.Namespace) -> List[RepositoryActivity]:
+    """并行获取所有可见仓库的活动数据，返回按仓库名排序的 RepositoryActivity 列表。
+
+    使用 ThreadPoolExecutor 并行拉取，单个仓库失败时记录警告并继续处理其他仓库。
+    """
     token = os.environ["GITEA_TOKEN"]
     discovery_client = GiteaClient(args.base_url, token)
     repos = list_repositories(discovery_client, query=args.repo_query, limit=args.repo_limit)
@@ -200,6 +217,7 @@ def fetch_repository_activity(
     include_code: bool = True,
     code_commit_limit: int = 10,
 ) -> RepositoryActivity:
+    """获取单个仓库的活动数据并分类提交，供管理者报告使用。"""
     token = os.environ["GITEA_TOKEN"]
     client = GiteaClient(repo.base_url, token)
     selected_branch = branch or repo.default_branch or "main"
@@ -223,6 +241,7 @@ def fetch_repository_activity(
 
 
 def run(argv: Optional[List[str]] = None) -> int:
+    """主入口：解析参数，根据模式分发到对应的报告生成流程，返回退出码。"""
     try:
         args = parse_args(argv)
         setup_logging(args.verbose)
@@ -254,6 +273,11 @@ def _run_single_repo_report(args: argparse.Namespace) -> str:
         code_commit_limit=args.code_commit_limit,
     )
     classified = classify_commits(raw_data.get("commits", []))
+    if args.write_memory:
+        _write_activities_to_memory(
+            [_activity_from_single_repo(args.repo_url, selected_branch, raw_data, classified, errors)],
+            args,
+        )
 
     if args.no_ai:
         return build_raw_report(classified, raw_data, errors, args)
@@ -293,6 +317,11 @@ def _run_detail_report(args: argparse.Namespace) -> str:
     all_errors = errors + snapshot_errors
     if all_errors:
         filtered["errors"] = all_errors
+    if args.write_memory:
+        _write_activities_to_memory(
+            [_activity_from_single_repo(args.repo_url, selected_branch, filtered, classified, all_errors)],
+            args,
+        )
 
     if args.no_ai or args.scan_only:
         return build_detail_raw_report(filtered, classified, args)
@@ -309,6 +338,8 @@ def _run_detail_report(args: argparse.Namespace) -> str:
 
 def _run_manager_report(args: argparse.Namespace) -> str:
     activities = fetch_manager_activities(args)
+    if args.write_memory:
+        _write_activities_to_memory(activities, args)
     employees = build_employee_summaries(activities)
     current_snapshot = build_history_snapshot(activities, employees, args)
     history_dir = resolve_history_dir(args.output, args.history_dir)
@@ -326,6 +357,57 @@ def _run_manager_report(args: argparse.Namespace) -> str:
     if not args.no_history:
         save_history_snapshot(history_dir, current_snapshot, report)
     return report
+
+
+def _activity_from_single_repo(
+    repo_url: str,
+    branch: str,
+    raw_data: Dict,
+    classified,
+    errors: List[str],
+) -> RepositoryActivity:
+    return RepositoryActivity(
+        repo=parse_repo_url(repo_url),
+        branch=branch,
+        raw_data=raw_data,
+        classified=classified,
+        errors=errors,
+    )
+
+
+def _write_activities_to_memory(activities: List[RepositoryActivity], args: argparse.Namespace) -> None:
+    """将仓库活动数据写入 org_memory SQLite 数据库，同时运行规则提取器生成 facts 和 relationships。"""
+    db_path = _resolve_memory_db_path(args)
+    store = LocalSQLiteMemoryStore(str(db_path))
+    extractor = RuleFactExtractor()
+    for activity in activities:
+        ingest = build_gitea_ingest_result(activity)
+        extraction = extractor.extract(ingest.events)
+        combined = IngestResult(
+            entities=ingest.entities,
+            sources=ingest.sources,
+            events=ingest.events,
+            facts=ingest.facts + extraction.facts,
+            relationships=ingest.relationships + extraction.relationships,
+        )
+        apply_ingest_result(store, combined)
+        repo_name = activity.repo.full_name or "{0}/{1}".format(activity.repo.owner, activity.repo.repo)
+        store.audit(
+            action="repo_analyzer_ingest",
+            target_type="repo",
+            target_id=repo_name,
+            actor_id="system:repo_analyzer",
+            reason="write-memory CLI option",
+        )
+        if extraction.errors:
+            logging.warning("%s extraction warnings: %s", repo_name, "; ".join(extraction.errors))
+    logging.info("org_memory wrote %s repository activities to %s", len(activities), db_path)
+
+
+def _resolve_memory_db_path(args: argparse.Namespace) -> Path:
+    if getattr(args, "memory_db", None):
+        return Path(args.memory_db).expanduser()
+    return Path(__file__).resolve().parents[2] / "data" / "org_memory.sqlite"
 
 
 def _fetch_file_snapshots(repo_url: str, raw_data: Dict, args: argparse.Namespace) -> Tuple[List[Dict], List[str]]:
@@ -370,6 +452,10 @@ def _fetch_repo_sources(
     include_code: bool = False,
     code_commit_limit: int = 10,
 ) -> Tuple[Dict, List[str]]:
+    """并行拉取单个仓库的 commits/issues/PRs/branches 和项目文档，可选拉取 commit 代码详情。
+
+    返回 (raw_data, errors)，errors 包含各数据源的非致命错误。
+    """
     since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
     jobs = {
         "commits": lambda: fetch_commits(client, ref.owner, ref.repo, branch, since, max_commits, include_code),
@@ -421,6 +507,7 @@ def _fetch_commit_details(
     commits: List[Dict],
     include_code: bool,
 ) -> Tuple[List[Dict], List[str]]:
+    """逐个获取 commit 的代码详情（文件变更和 patch），已有详情的 commit 直接复用。"""
     details: List[Dict] = []
     errors: List[str] = []
     for item in commits:
