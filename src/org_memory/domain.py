@@ -152,6 +152,7 @@ class MemoryQuery:
     user_id: str                                    # 发起查询的用户 ID，用于权限校验
     role: str = "employee"                          # 用户角色，决定可读范围
     project_ids: List[str] = field(default_factory=list)
+    team_ids: List[str] = field(default_factory=list)       # 可访问团队范围，用于 team scope 隔离
     person_ids: List[str] = field(default_factory=list)
     fact_types: List[str] = field(default_factory=list)
     source_types: List[str] = field(default_factory=list)

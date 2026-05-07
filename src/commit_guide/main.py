@@ -9,7 +9,7 @@ from typing import Callable, List, Optional
 from org_memory.domain import IngestResult
 from org_memory.extraction import RuleFactExtractor
 from org_memory.ingest import build_commit_guide_ingest_result
-from org_memory.store import LocalSQLiteMemoryStore, apply_ingest_result
+from org_memory.store import LocalSQLiteMemoryStore
 
 from .ai_assist import CommitMessageGenerator
 from .git_utils import (
@@ -25,31 +25,7 @@ from .git_utils import (
 from .types import format_commit_message, get_commit_types, is_valid_commit_message
 
 
-"""commit-guide v2.0 —— AI 读取 diff，自动生成 commit message。"""
-
-import argparse
-import os
-import sys
-from pathlib import Path
-from typing import Callable, List, Optional
-
-from org_memory.domain import IngestResult
-from org_memory.extraction import RuleFactExtractor
-from org_memory.ingest import build_commit_guide_ingest_result
-from org_memory.store import LocalSQLiteMemoryStore, apply_ingest_result
-
-from .ai_assist import CommitMessageGenerator
-from .git_utils import (
-    check_git_available,
-    execute_add,
-    execute_commit,
-    execute_push,
-    get_remotes,
-    get_repo_status,
-    get_staged_diff,
-    is_git_repo,
-)
-from .types import format_commit_message, get_commit_types, is_valid_commit_message
+PUSH_ALL_REMOTES = "__all__"
 
 
 class SmartCommit:
@@ -214,7 +190,7 @@ class SmartCommit:
                 return self._do_commit(message, status)
 
             if label == "手动编辑":
-                message = self._manual_edit()
+                message = self._manual_edit(message)
                 if message is None:
                     self.output("已取消提交")
                     return 1
@@ -229,11 +205,64 @@ class SmartCommit:
                 self.output("已取消提交")
                 return 1
 
-    def _manual_edit(self) -> Optional[str]:
-        """手动编辑模式：复用 v1.0 的 type/scope/描述 交互逻辑。
+    def _manual_edit(self, base_message: Optional[str] = None) -> Optional[str]:
+        """手动编辑模式：有现有 message 时支持追加正文要点，否则走完整重写。
 
         返回生成的 message 字符串，用户取消则返回 None。
         """
+        if base_message:
+            edited = self._edit_existing_message(base_message)
+            if edited is not None:
+                return edited
+            return None
+        return self._rewrite_message()
+
+    def _edit_existing_message(self, base_message: str) -> Optional[str]:
+        """基于已有 commit message 追加正文要点，或选择完整重写。"""
+        self.output("\n─── 手动编辑模式 ───\n")
+        self.output("当前 message:")
+        self.output(base_message)
+        self.output("")
+        self.output("请选择编辑方式:")
+        self.output("  [1] 在当前 message 后追加正文要点")
+        self.output("  [2] 完全重写")
+        self.output("  [3] 取消编辑")
+        while True:
+            choice = self.input("请输入序号 (1-3): ").strip()
+            if choice == "1":
+                return self._append_body_items(base_message)
+            if choice == "2":
+                return self._rewrite_message()
+            if choice == "3":
+                return None
+            self.output("选择无效，请重新输入")
+
+    def _append_body_items(self, base_message: str) -> Optional[str]:
+        """向现有 message 追加正文要点；空行结束输入。"""
+        self.output("请输入要追加的正文要点，逐行输入，空行结束。")
+        self.output("提示：不用输入 '- '，工具会自动补。")
+        additions: List[str] = []
+        while True:
+            raw = self.input("追加要点: ").strip()
+            if not raw:
+                break
+            additions.append(raw)
+        if not additions:
+            self.output("未输入追加内容，保留原 message。")
+            return base_message
+        message = append_commit_body_items(base_message, additions)
+        if not is_valid_commit_message(message):
+            self.output("追加后的 message 第一行不符合规范，请重新编辑。")
+            return None
+        self.output("\n预览:")
+        self.output(message)
+        confirm = self.input("确认使用此 message? [Y/n]: ").strip().lower()
+        if confirm in ("", "y", "yes"):
+            return message
+        return None
+
+    def _rewrite_message(self) -> Optional[str]:
+        """完整重写 commit message：复用 v1.0 的 type/scope/描述 交互逻辑。"""
         self.output("\n─── 手动编辑模式 ───\n")
 
         # 选择 type
@@ -285,21 +314,45 @@ class SmartCommit:
         selected_remote = None
 
         if self.push:
-            remote = self.push_target or self._select_push_remote()
+            remote = normalize_push_target(self.push_target) or self._select_push_remote()
             selected_remote = remote
             if not remote:
                 self.output("⚠ 未选择推送目标，请手动执行 git push")
                 if self.write_memory:
                     self._write_commit_memory(message, status, result.sha or "unknown", selected_remote)
                 return 0
-            ok, detail = execute_push(self.path, remote=remote, branch=status.branch)
-            if ok:
-                self.output("✓ 推送成功: {0}/{1}".format(remote, status.branch))
+            if remote == PUSH_ALL_REMOTES:
+                selected_remote = self._push_all_remotes(status.branch)
             else:
-                self.output("⚠ 推送失败: {0}".format(detail or "未知错误"))
+                ok, detail = execute_push(self.path, remote=remote, branch=status.branch)
+                if ok:
+                    self.output("✓ 推送成功: {0}".format(format_push_target(remote, status.branch)))
+                else:
+                    self.output("⚠ 推送失败: {0}".format(detail or "未知错误"))
         if self.write_memory:
             self._write_commit_memory(message, status, result.sha or "unknown", selected_remote)
         return 0
+
+    def _push_all_remotes(self, branch: str) -> str:
+        """推送到所有 remote，单个 remote 失败不影响其他 remote 继续重试。"""
+        remotes = get_remotes(self.path)
+        if not remotes:
+            self.output("⚠ 未配置 Git remote，请手动添加远端后推送")
+            return PUSH_ALL_REMOTES
+        pushed: List[str] = []
+        failed: List[str] = []
+        self.output("\n将推送到所有 Git remote: {0}".format(", ".join(remotes)))
+        for remote in remotes:
+            ok, detail = execute_push(self.path, remote=remote, branch=branch)
+            if ok:
+                pushed.append(remote)
+                self.output("✓ 推送成功: {0}".format(format_push_target(remote, branch)))
+            else:
+                failed.append(remote)
+                self.output("⚠ 推送失败 {0}: {1}".format(remote, detail or "未知错误"))
+        if failed:
+            self.output("⚠ 部分 remote 推送失败: {0}".format(", ".join(failed)))
+        return ",".join(pushed) if pushed else PUSH_ALL_REMOTES
 
     def _write_commit_memory(self, message: str, status, commit_sha: str, push_remote: Optional[str]) -> None:
         """将本次提交信息写入 org_memory SQLite 数据库，失败时只打印警告不中断流程。"""
@@ -324,7 +377,7 @@ class SmartCommit:
                 facts=ingest.facts + extraction.facts,
                 relationships=ingest.relationships + extraction.relationships,
             )
-            apply_ingest_result(store, combined)
+            store.apply_ingest_result(combined)
             store.audit(
                 action="commit_guide_ingest",
                 target_type="commit",
@@ -355,17 +408,20 @@ class SmartCommit:
             return remotes[0]
 
         self.output("\n检测到多个 Git remote，请选择推送目标:")
+        self.output("  [0] 所有")
         for index, remote in enumerate(remotes, start=1):
             self.output("  [{0}] {1}".format(index, remote))
         self.output("  [{0}] 跳过推送".format(len(remotes) + 1))
 
         while True:
-            choice = self.input("请选择推送目标 (1-{0}): ".format(len(remotes) + 1)).strip()
+            choice = self.input("请选择推送目标 (0-{0}): ".format(len(remotes) + 1)).strip()
             try:
                 index = int(choice)
             except ValueError:
                 self.output("选择无效，请重新输入")
                 continue
+            if index == 0:
+                return PUSH_ALL_REMOTES
             if 1 <= index <= len(remotes):
                 return remotes[index - 1]
             if index == len(remotes) + 1:
@@ -387,23 +443,66 @@ def parse_args(argv: Optional[list] = None) -> argparse.Namespace:
         "--add",
         nargs="*",
         metavar="PATH",
-        help="提交前自动 git add，不传路径时默认暂存 src/",
+        help="提交前自动 git add，不传路径时默认暂存目标仓库当前目录",
     )
     parser.add_argument("-v", "--version", action="version", version="commit-guide 2.0.0")
     return parser.parse_args(argv)
 
 
+def resolve_add_patterns(args: argparse.Namespace) -> Optional[List[str]]:
+    """解析 --add 参数；不带路径时默认 git add .，路径相对于 --path 指向的仓库。"""
+    if args.add is None:
+        return None
+    if args.add:
+        return args.add
+    return ["."]
+
+
+def append_commit_body_items(base_message: str, additions: List[str]) -> str:
+    """在 commit message 后追加正文 bullet，保留原 subject 和已有正文。"""
+    lines = [line.rstrip() for line in base_message.strip().splitlines()]
+    cleaned = []
+    for item in additions:
+        text = item.strip()
+        if not text:
+            continue
+        if text.startswith("-"):
+            text = text[1:].strip()
+        if text:
+            cleaned.append(text)
+    if not cleaned:
+        return base_message.strip()
+    while lines and not lines[-1].strip():
+        lines.pop()
+    if len(lines) == 1:
+        lines.append("")
+    elif lines and lines[-1].strip():
+        lines.append("")
+    lines.extend("- {0}".format(item) for item in cleaned)
+    return "\n".join(lines).strip()
+
+
+def normalize_push_target(value: Optional[str]) -> Optional[str]:
+    """规范化 --push-target，允许 all/*/所有 表示推送全部 remote。"""
+    if value is None:
+        return None
+    text = value.strip()
+    if text.lower() in ("all", "*", PUSH_ALL_REMOTES) or text == "所有":
+        return PUSH_ALL_REMOTES
+    return text or None
+
+
+def format_push_target(remote: str, branch: str) -> str:
+    """格式化推送目标，分支未知时不显示 /unknown。"""
+    if branch and branch not in ("HEAD", "unknown"):
+        return "{0}/{1}".format(remote, branch)
+    return remote
+
+
 def main(argv: Optional[list] = None) -> int:
     """CLI 入口：解析参数并启动 SmartCommit 主流程。"""
     args = parse_args(argv)
-    add_patterns: Optional[List[str]] = None
-    if args.add is not None:
-        if args.add:
-            add_patterns = args.add
-        else:
-            # 默认暂存 src/，路径相对于仓库根（main.py 的上上级目录）
-            repo_root = Path(__file__).resolve().parents[2]
-            add_patterns = [str(repo_root / "src")]
+    add_patterns = resolve_add_patterns(args)
     app = SmartCommit(
         path=args.path,
         no_ai=args.no_ai,

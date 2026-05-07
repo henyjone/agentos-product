@@ -8,6 +8,7 @@ from .analyzer import AnalysisResult, WorkSummaryResult
 from .code_context import build_code_change_context, summarize_code_changes
 from .data_builder import ClassifiedCommit, compute_stats, identify_builtin_risks
 from .gitea_client import RepoRef
+from .memory_context import build_memory_prompt_section, build_memory_report_section
 from .project_context import build_project_context_section, summarize_project_context_documents
 from .rendering import escape_cell, format_counts
 
@@ -141,6 +142,9 @@ def build_manager_analysis_context(
         "## Project context documents",
         _project_context_sections(activities[:50]),
         "",
+        "## Organization memory context",
+        build_memory_prompt_section(getattr(args, "memory_context", None)),
+        "",
         "## Code change evidence",
         _code_change_sections(activities[:50], args),
         "",
@@ -180,6 +184,7 @@ def build_manager_raw_report(
     errors = _error_lines(activities)
     if errors:
         lines.extend(["", "## 数据拉取警告", "", errors])
+    _append_memory_report_section(lines, args)
     return "\n".join(lines).strip() + "\n"
 
 
@@ -207,6 +212,7 @@ def format_manager_ai_report(
     errors = _error_lines(activities)
     if errors:
         lines.extend(["", "## 数据拉取警告", "", errors])
+    _append_memory_report_section(lines, args)
     return "\n".join(lines).strip() + "\n"
 
 
@@ -246,6 +252,9 @@ def build_manager_work_summary_context(
             "## Project context documents",
             _project_context_sections(activities[:50]),
             "",
+            "## Organization memory context",
+            build_memory_prompt_section(getattr(args, "memory_context", None)),
+            "",
             "Only return employees and completed work items. Do not include related project lists.",
         ]
     )
@@ -283,6 +292,7 @@ def format_manager_work_summary_report(
     errors = _error_lines(activities)
     if errors:
         lines.extend(["## 数据拉取警告", "", errors, ""])
+    _append_memory_report_section(lines, args)
     return "\n".join(lines).strip() + "\n"
 
 
@@ -388,6 +398,16 @@ def _project_context_sections(activities: List[RepositoryActivity]) -> str:
             ]
         )
     return "\n".join(sections).strip() or "- No project context documents found."
+
+
+def _append_memory_report_section(lines: List[str], args) -> None:
+    """按需向管理者报告追加简短组织记忆参考区块。"""
+    memory_section = build_memory_report_section(
+        getattr(args, "memory_context", None),
+        max_items=getattr(args, "memory_show_limit", None),
+    )
+    if memory_section:
+        lines.extend(["", memory_section])
 
 
 def _code_change_sections(activities: List[RepositoryActivity], args) -> str:

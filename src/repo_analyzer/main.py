@@ -13,7 +13,7 @@ from urllib.parse import urlparse
 from org_memory.domain import IngestResult
 from org_memory.extraction import RuleFactExtractor
 from org_memory.ingest import build_gitea_ingest_result
-from org_memory.store import LocalSQLiteMemoryStore, apply_ingest_result
+from org_memory.store import LocalSQLiteMemoryStore
 
 from .analyzer import AIAnalysisError, run_ai_analysis, run_detail_worklog_analysis, run_work_summary_analysis
 from .config_loader import get_default_model_config
@@ -50,6 +50,15 @@ from .manager import (
     build_manager_raw_report,
     format_manager_work_summary_report,
 )
+from .memory_context import (
+    DEFAULT_MEMORY_DAYS,
+    DEFAULT_MEMORY_LIMIT,
+    DEFAULT_MEMORY_ROLE,
+    DEFAULT_MEMORY_SHOW_LIMIT,
+    DEFAULT_MEMORY_USER_ID,
+    load_memory_context_for_repos,
+    resolve_memory_db_path,
+)
 from .output import build_raw_report, format_ai_report, render_report
 from .project_context import fetch_project_context_documents
 
@@ -72,7 +81,13 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--branch", default=None, help="target branch; all-repos mode uses each repo default when omitted")
     parser.add_argument("--output", "-o", default=None, help="write Markdown report to file")
     parser.add_argument("--write-memory", action="store_true", help="write scanned evidence into org_memory SQLite store")
+    parser.add_argument("--use-memory", action="store_true", help="read org_memory SQLite facts and inject them into analysis context")
     parser.add_argument("--memory-db", default=None, help="org_memory SQLite path; default is data/org_memory.sqlite")
+    parser.add_argument("--memory-user-id", default=DEFAULT_MEMORY_USER_ID, help="org_memory query user id")
+    parser.add_argument("--memory-role", default=DEFAULT_MEMORY_ROLE, help="org_memory query role, default manager")
+    parser.add_argument("--memory-limit", type=int, default=DEFAULT_MEMORY_LIMIT, help="maximum org_memory facts to load")
+    parser.add_argument("--memory-days", type=int, default=DEFAULT_MEMORY_DAYS, help="org_memory lookback days; 0 means all history")
+    parser.add_argument("--memory-show-limit", type=int, default=DEFAULT_MEMORY_SHOW_LIMIT, help="maximum org_memory facts to show in reports")
     parser.add_argument("--no-ai", action="store_true", help="skip AI analysis")
     parser.add_argument("--ai-timeout", type=int, default=None, help="AI request timeout seconds; default is 300")
     parser.add_argument("--no-code-context", action="store_true", help="skip commit file/stat/patch detail fetching")
@@ -117,6 +132,12 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("max-file-snapshots must not be negative")
     if getattr(args, "max_file_content_chars", 2500) < 0:
         raise ValueError("max-file-content-chars must not be negative")
+    if getattr(args, "memory_limit", DEFAULT_MEMORY_LIMIT) < 1:
+        raise ValueError("memory-limit must be greater than 0")
+    if getattr(args, "memory_days", DEFAULT_MEMORY_DAYS) < 0:
+        raise ValueError("memory-days must not be negative")
+    if getattr(args, "memory_show_limit", DEFAULT_MEMORY_SHOW_LIMIT) < 0:
+        raise ValueError("memory-show-limit must not be negative")
 
     if getattr(args, "all_repos", False):
         args.base_url = (args.base_url or os.environ.get("GITEA_BASE_URL") or "").rstrip("/")
@@ -273,6 +294,11 @@ def _run_single_repo_report(args: argparse.Namespace) -> str:
         code_commit_limit=args.code_commit_limit,
     )
     classified = classify_commits(raw_data.get("commits", []))
+    if args.use_memory:
+        raw_data["memory_context"] = load_memory_context_for_repos(
+            [parse_repo_url(args.repo_url)],
+            args,
+        )
     if args.write_memory:
         _write_activities_to_memory(
             [_activity_from_single_repo(args.repo_url, selected_branch, raw_data, classified, errors)],
@@ -317,6 +343,12 @@ def _run_detail_report(args: argparse.Namespace) -> str:
     all_errors = errors + snapshot_errors
     if all_errors:
         filtered["errors"] = all_errors
+    if args.use_memory:
+        filtered["memory_context"] = load_memory_context_for_repos(
+            [parse_repo_url(args.repo_url)],
+            args,
+            person_labels=[args.author] if args.author else [],
+        )
     if args.write_memory:
         _write_activities_to_memory(
             [_activity_from_single_repo(args.repo_url, selected_branch, filtered, classified, all_errors)],
@@ -338,9 +370,14 @@ def _run_detail_report(args: argparse.Namespace) -> str:
 
 def _run_manager_report(args: argparse.Namespace) -> str:
     activities = fetch_manager_activities(args)
+    employees = build_employee_summaries(activities)
+    if args.use_memory:
+        args.memory_context = load_memory_context_for_repos(
+            [activity.repo for activity in activities],
+            args,
+        )
     if args.write_memory:
         _write_activities_to_memory(activities, args)
-    employees = build_employee_summaries(activities)
     current_snapshot = build_history_snapshot(activities, employees, args)
     history_dir = resolve_history_dir(args.output, args.history_dir)
     if args.no_ai:
@@ -390,7 +427,7 @@ def _write_activities_to_memory(activities: List[RepositoryActivity], args: argp
             facts=ingest.facts + extraction.facts,
             relationships=ingest.relationships + extraction.relationships,
         )
-        apply_ingest_result(store, combined)
+        store.apply_ingest_result(combined)
         repo_name = activity.repo.full_name or "{0}/{1}".format(activity.repo.owner, activity.repo.repo)
         store.audit(
             action="repo_analyzer_ingest",
@@ -405,9 +442,7 @@ def _write_activities_to_memory(activities: List[RepositoryActivity], args: argp
 
 
 def _resolve_memory_db_path(args: argparse.Namespace) -> Path:
-    if getattr(args, "memory_db", None):
-        return Path(args.memory_db).expanduser()
-    return Path(__file__).resolve().parents[2] / "data" / "org_memory.sqlite"
+    return resolve_memory_db_path(args)
 
 
 def _fetch_file_snapshots(repo_url: str, raw_data: Dict, args: argparse.Namespace) -> Tuple[List[Dict], List[str]]:

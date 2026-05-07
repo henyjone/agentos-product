@@ -1,5 +1,6 @@
 """内存存储实现 —— 基于字典的 MemoryStore，主要用于测试和轻量场景。"""
 
+from datetime import date, datetime, time, timezone
 from typing import Dict, List, Optional
 
 from ..domain import Entity, Fact, IngestResult, MemoryQuery, RawEvent, Relationship, Source
@@ -51,7 +52,7 @@ class InMemoryMemoryStore:
         context = AccessContext(
             user_id=query.user_id,
             role=query.role,
-            team_ids=tuple(),
+            team_ids=tuple(query.team_ids),
             project_ids=tuple(query.project_ids),
             break_glass=query.break_glass,
             reason=query.reason,
@@ -82,6 +83,7 @@ class InMemoryMemoryStore:
                 sensitivity=fact.sensitivity,
                 owner_id=fact.subject_entity_id,
                 project_id=fact.project_id,
+                team_id=fact.metadata.get("team_id"),
             ):
                 continue
             results.append(fact)
@@ -93,7 +95,7 @@ class InMemoryMemoryStore:
         context = AccessContext(
             user_id=query.user_id,
             role=query.role,
-            team_ids=tuple(),
+            team_ids=tuple(query.team_ids),
             project_ids=tuple(query.project_ids),
             break_glass=query.break_glass,
             reason=query.reason,
@@ -114,6 +116,7 @@ class InMemoryMemoryStore:
                 sensitivity=event.sensitivity,
                 owner_id=event.actor_id,
                 project_id=event.project_id,
+                team_id=event.payload.get("team_id"),
             ):
                 continue
             results.append(event)
@@ -137,15 +140,39 @@ class InMemoryMemoryStore:
 
 
 def _in_time_window(value: str, time_from: Optional[str], time_to: Optional[str]) -> bool:
-    """判断时间字符串是否在 [time_from, time_to] 范围内，只比较日期部分（前 10 位）。"""
+    """判断时间字符串是否在 [time_from, time_to] 范围内，支持小时级 ISO 时间比较。"""
     if not value:
         return True
-    current = value[:10] if len(value) >= 10 else value
-    if time_from and current < time_from[:10]:
+    current = _parse_time(value)
+    start = _parse_time(time_from)
+    end = _parse_time(time_to, end_of_day=True)
+    if current is None:
+        return True
+    if start and current < start:
         return False
-    if time_to and current > time_to[:10]:
+    if end and current > end:
         return False
     return True
+
+
+def _parse_time(value: Optional[str], end_of_day: bool = False) -> Optional[datetime]:
+    """解析 ISO 日期/时间；date-only 的上界按当天结束处理，保持旧查询语义。"""
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        if len(text) <= 10:
+            parsed_date = date.fromisoformat(text[:10])
+            parsed = datetime.combine(parsed_date, time.max if end_of_day else time.min)
+        else:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _matches_source_types(source_ids: List[str], sources: Dict[str, Source], source_types: List[str]) -> bool:

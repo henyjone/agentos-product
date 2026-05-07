@@ -3,13 +3,13 @@
 import json
 import sqlite3
 from dataclasses import asdict
+from datetime import date, datetime, time, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Type, TypeVar
 
 from ..domain import Entity, Fact, IngestResult, MemoryQuery, RawEvent, Relationship, Source
 from ..scope import AccessContext, PermissionPolicy
 from ..time_utils import utc_now_iso
-from .utils import apply_ingest_result
 
 
 T = TypeVar("T")
@@ -45,13 +45,25 @@ class LocalSQLiteMemoryStore:
         self._upsert("relationships", relationship.id, relationship)
 
     def apply_ingest_result(self, result: IngestResult) -> None:
-        apply_ingest_result(self, result)
+        """在单个 SQLite 事务中批量写入 IngestResult，失败时整体回滚。"""
+        with self._connect() as conn:
+            for entity in result.entities:
+                self._upsert_on_conn(conn, "entities", entity.id, entity)
+            for source in result.sources:
+                self._upsert_on_conn(conn, "sources", source.id, source)
+            for event in result.events:
+                self._upsert_on_conn(conn, "raw_events", event.id, event)
+            for fact in result.facts:
+                self._upsert_on_conn(conn, "facts", fact.id, fact)
+            for relationship in result.relationships:
+                self._upsert_on_conn(conn, "relationships", relationship.id, relationship)
 
     def search_facts(self, query: MemoryQuery) -> List[Fact]:
         """从 SQLite 加载所有事实，在内存中应用过滤和权限校验后返回。"""
         context = AccessContext(
             user_id=query.user_id,
             role=query.role,
+            team_ids=tuple(query.team_ids),
             project_ids=tuple(query.project_ids),
             break_glass=query.break_glass,
             reason=query.reason,
@@ -59,9 +71,7 @@ class LocalSQLiteMemoryStore:
         # 预加载 sources 用于 source_type 过滤
         sources = {source.id: source for source in self._load_all("sources", Source)}
         results: List[Fact] = []
-        for fact in self._load_all("facts", Fact):
-            if fact.status != "active":
-                continue
+        for fact in self._load_candidate_facts(query):
             if query.project_ids and fact.project_id not in query.project_ids:
                 continue
             if query.person_ids and fact.subject_entity_id not in query.person_ids:
@@ -84,6 +94,7 @@ class LocalSQLiteMemoryStore:
                 sensitivity=fact.sensitivity,
                 owner_id=fact.subject_entity_id,
                 project_id=fact.project_id,
+                team_id=fact.metadata.get("team_id"),
             ):
                 continue
             results.append(fact)
@@ -95,12 +106,13 @@ class LocalSQLiteMemoryStore:
         context = AccessContext(
             user_id=query.user_id,
             role=query.role,
+            team_ids=tuple(query.team_ids),
             project_ids=tuple(query.project_ids),
             break_glass=query.break_glass,
             reason=query.reason,
         )
         results: List[RawEvent] = []
-        for event in self._load_all("raw_events", RawEvent):
+        for event in self._load_candidate_events(query):
             if query.project_ids and event.project_id not in query.project_ids:
                 continue
             if query.person_ids and event.actor_id not in query.person_ids:
@@ -115,6 +127,7 @@ class LocalSQLiteMemoryStore:
                 sensitivity=event.sensitivity,
                 owner_id=event.actor_id,
                 project_id=event.project_id,
+                team_id=event.payload.get("team_id"),
             ):
                 continue
             results.append(event)
@@ -169,10 +182,18 @@ class LocalSQLiteMemoryStore:
     def _upsert_json(self, table: str, row_id: str, data: Dict) -> None:
         """将字典序列化为 JSON 后 INSERT OR REPLACE 到指定表。"""
         with self._connect() as conn:
-            conn.execute(
-                "INSERT OR REPLACE INTO {0} (id, data_json, updated_at) VALUES (?, ?, ?)".format(table),
-                (row_id, json.dumps(data, ensure_ascii=False, sort_keys=True), utc_now_iso()),
-            )
+            self._upsert_json_on_conn(conn, table, row_id, data)
+
+    def _upsert_on_conn(self, conn: sqlite3.Connection, table: str, row_id: str, item) -> None:
+        """在已有连接/事务中写入 dataclass 实例。"""
+        self._upsert_json_on_conn(conn, table, row_id, asdict(item))
+
+    def _upsert_json_on_conn(self, conn: sqlite3.Connection, table: str, row_id: str, data: Dict) -> None:
+        """使用已有连接执行 INSERT OR REPLACE。"""
+        conn.execute(
+            "INSERT OR REPLACE INTO {0} (id, data_json, updated_at) VALUES (?, ?, ?)".format(table),
+            (row_id, json.dumps(data, ensure_ascii=False, sort_keys=True), utc_now_iso()),
+        )
 
     def _get(self, table: str, row_id: str, cls: Type[T]) -> Optional[T]:
         """按 ID 从指定表读取单条记录并反序列化为指定类型。"""
@@ -188,17 +209,82 @@ class LocalSQLiteMemoryStore:
             rows = conn.execute("SELECT data_json FROM {0}".format(table)).fetchall()
         return [cls(**json.loads(row[0])) for row in rows]
 
+    def _load_candidate_facts(self, query: MemoryQuery) -> List[Fact]:
+        """用 SQLite JSON 查询先做粗过滤，再交给 Python 做权限和复杂条件过滤。"""
+        where = ["COALESCE(json_extract(data_json, '$.status'), 'active') = ?"]
+        params: List[str] = ["active"]
+        _append_json_in(where, params, "$.project_id", query.project_ids)
+        _append_json_in(where, params, "$.subject_entity_id", query.person_ids)
+        _append_json_in(where, params, "$.fact_type", query.fact_types)
+        _append_json_in(where, params, "$.scope", query.scopes)
+        return self._load_filtered("facts", Fact, where, params)
+
+    def _load_candidate_events(self, query: MemoryQuery) -> List[RawEvent]:
+        """用 SQLite JSON 查询先做粗过滤，再交给 Python 做权限和复杂条件过滤。"""
+        where: List[str] = []
+        params: List[str] = []
+        _append_json_in(where, params, "$.project_id", query.project_ids)
+        _append_json_in(where, params, "$.actor_id", query.person_ids)
+        _append_json_in(where, params, "$.scope", query.scopes)
+        return self._load_filtered("raw_events", RawEvent, where, params)
+
+    def _load_filtered(self, table: str, cls: Type[T], where: List[str], params: List[str]) -> List[T]:
+        """按 SQL 条件读取 JSON 行；SQLite 未启用 JSON1 时回退到全表加载。"""
+        sql = "SELECT data_json FROM {0}".format(table)
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(sql, params).fetchall()
+        except sqlite3.OperationalError:
+            return self._load_all(table, cls)
+        return [cls(**json.loads(row[0])) for row in rows]
+
 
 def _in_time_window(value: str, time_from: Optional[str], time_to: Optional[str]) -> bool:
-    """判断时间字符串是否在 [time_from, time_to] 范围内，只比较日期部分（前 10 位）。"""
+    """判断时间字符串是否在 [time_from, time_to] 范围内，支持小时级 ISO 时间比较。"""
     if not value:
         return True
-    current = value[:10] if len(value) >= 10 else value
-    if time_from and current < time_from[:10]:
+    current = _parse_time(value)
+    start = _parse_time(time_from)
+    end = _parse_time(time_to, end_of_day=True)
+    if current is None:
+        return True
+    if start and current < start:
         return False
-    if time_to and current > time_to[:10]:
+    if end and current > end:
         return False
     return True
+
+
+def _append_json_in(where: List[str], params: List[str], json_path: str, values: List[str]) -> None:
+    """追加 json_extract IN 条件。json_path 仅接受本模块内的固定字符串。"""
+    cleaned = [str(value) for value in values if str(value)]
+    if not cleaned:
+        return
+    placeholders = ", ".join("?" for _ in cleaned)
+    where.append("json_extract(data_json, '{0}') IN ({1})".format(json_path, placeholders))
+    params.extend(cleaned)
+
+
+def _parse_time(value: Optional[str], end_of_day: bool = False) -> Optional[datetime]:
+    """解析 ISO 日期/时间；date-only 的上界按当天结束处理，保持旧查询语义。"""
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        if len(text) <= 10:
+            parsed_date = date.fromisoformat(text[:10])
+            parsed = datetime.combine(parsed_date, time.max if end_of_day else time.min)
+        else:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _matches_source_types(source_ids: List[str], sources: Dict[str, Source], source_types: List[str]) -> bool:

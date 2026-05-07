@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from .code_context import build_code_change_context
+from .memory_context import build_memory_prompt_section
 from .project_context import build_project_context_section
 
 
@@ -180,6 +181,9 @@ def build_analysis_context(classified: List[ClassifiedCommit], raw_data: Dict, a
         "",
         "## Project Context Documents",
         build_project_context_section(raw_data.get("project_context", [])),
+        "",
+        "## Organization Memory Context",
+        build_memory_prompt_section(raw_data.get("memory_context")),
         "",
         "## Commit 统计",
         "- 总计: {0} 条".format(stats.total),

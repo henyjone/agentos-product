@@ -5,6 +5,7 @@ from typing import Dict, List, Optional
 from .analyzer import AnalysisResult
 from .code_context import build_code_change_context
 from .data_builder import ClassifiedCommit, classify_commits
+from .memory_context import build_memory_prompt_section, build_memory_report_section
 from .project_context import build_project_context_section
 from .rendering import bullet_list, risk_list
 
@@ -68,6 +69,9 @@ def build_detail_worklog_context(raw_data: Dict, classified: List[ClassifiedComm
         "## Project context documents",
         build_project_context_section(raw_data.get("project_context", [])),
         "",
+        "## Organization memory context",
+        build_memory_prompt_section(raw_data.get("memory_context")),
+        "",
         "## Commits",
         "\n".join(_format_commit(item) for item in classified) or "- None",
         "",
@@ -91,87 +95,97 @@ def build_detail_worklog_context(raw_data: Dict, classified: List[ClassifiedComm
 
 def build_detail_raw_report(raw_data: Dict, classified: List[ClassifiedCommit], args) -> str:
     """构建不依赖 AI 的详细工作日志原始报告。"""
-    return "\n".join(
-        [
-            "# 详细工作日志",
-            "",
-            "## 筛选范围",
-            "",
-            "- 仓库: {0}".format(getattr(args, "repo_url", "")),
-            "- 作者: {0}".format(getattr(args, "author", None) or "-"),
-            "- 路径: {0}".format(", ".join(getattr(args, "path_filter", []) or []) or "-"),
-            "- Commit: {0}".format(", ".join(getattr(args, "commit", []) or []) or "-"),
-            "",
-            "## 项目上下文",
-            "",
-            build_project_context_section(raw_data.get("project_context", [])),
-            "",
-            "## 完成工作",
-            "",
-            bullet_list([item.full_message for item in classified]),
-            "",
-            "## 代码证据",
-            "",
-            build_code_change_context(
-                raw_data.get("commit_details", []),
-                max_files=getattr(args, "max_files_per_commit", 20),
-                max_patch_chars=getattr(args, "max_patch_chars", 5000),
-            ),
-            "",
-            "## 文件内容快照",
-            "",
-            build_file_snapshot_context(
-                raw_data.get("file_snapshots", []),
-                max_chars=getattr(args, "max_file_content_chars", 2500),
-            ),
-        ]
-    ).strip() + "\n"
+    lines = [
+        "# 详细工作日志",
+        "",
+        "## 筛选范围",
+        "",
+        "- 仓库: {0}".format(getattr(args, "repo_url", "")),
+        "- 作者: {0}".format(getattr(args, "author", None) or "-"),
+        "- 路径: {0}".format(", ".join(getattr(args, "path_filter", []) or []) or "-"),
+        "- Commit: {0}".format(", ".join(getattr(args, "commit", []) or []) or "-"),
+        "",
+        "## 项目上下文",
+        "",
+        build_project_context_section(raw_data.get("project_context", [])),
+        "",
+        "## 完成工作",
+        "",
+        bullet_list([item.full_message for item in classified]),
+        "",
+        "## 代码证据",
+        "",
+        build_code_change_context(
+            raw_data.get("commit_details", []),
+            max_files=getattr(args, "max_files_per_commit", 20),
+            max_patch_chars=getattr(args, "max_patch_chars", 5000),
+        ),
+        "",
+        "## 文件内容快照",
+        "",
+        build_file_snapshot_context(
+            raw_data.get("file_snapshots", []),
+            max_chars=getattr(args, "max_file_content_chars", 2500),
+        ),
+    ]
+    memory_section = build_memory_report_section(
+        raw_data.get("memory_context"),
+        max_items=getattr(args, "memory_show_limit", None),
+    )
+    if memory_section:
+        lines.extend(["", memory_section])
+    return "\n".join(lines).strip() + "\n"
 
 
 def format_detail_ai_report(analysis: AnalysisResult, raw_data: Dict, classified: List[ClassifiedCommit], args) -> str:
     """将 AI 详细工作日志分析结果格式化为完整 Markdown 报告。"""
-    return "\n".join(
-        [
-            "# 详细工作日志",
-            "",
-            analysis.summary.strip(),
-            "",
-            "## 项目上下文",
-            "",
-            build_project_context_section(raw_data.get("project_context", [])),
-            "",
-            "## 完成工作",
-            "",
-            bullet_list(analysis.facts or [item.full_message for item in classified]),
-            "",
-            "## 实现判断",
-            "",
-            bullet_list(analysis.inferences),
-            "",
-            "## 风险",
-            "",
-            risk_list(analysis.risks),
-            "",
-            "## 后续事项",
-            "",
-            bullet_list(analysis.suggestions),
-            "",
-            "## 代码证据",
-            "",
-            build_code_change_context(
-                raw_data.get("commit_details", []),
-                max_files=getattr(args, "max_files_per_commit", 20),
-                max_patch_chars=getattr(args, "max_patch_chars", 5000),
-            ),
-            "",
-            "## 文件内容快照",
-            "",
-            build_file_snapshot_context(
-                raw_data.get("file_snapshots", []),
-                max_chars=getattr(args, "max_file_content_chars", 2500),
-            ),
-        ]
-    ).strip() + "\n"
+    lines = [
+        "# 详细工作日志",
+        "",
+        analysis.summary.strip(),
+        "",
+        "## 项目上下文",
+        "",
+        build_project_context_section(raw_data.get("project_context", [])),
+        "",
+        "## 完成工作",
+        "",
+        bullet_list(analysis.facts or [item.full_message for item in classified]),
+        "",
+        "## 实现判断",
+        "",
+        bullet_list(analysis.inferences),
+        "",
+        "## 风险",
+        "",
+        risk_list(analysis.risks),
+        "",
+        "## 后续事项",
+        "",
+        bullet_list(analysis.suggestions),
+        "",
+        "## 代码证据",
+        "",
+        build_code_change_context(
+            raw_data.get("commit_details", []),
+            max_files=getattr(args, "max_files_per_commit", 20),
+            max_patch_chars=getattr(args, "max_patch_chars", 5000),
+        ),
+        "",
+        "## 文件内容快照",
+        "",
+        build_file_snapshot_context(
+            raw_data.get("file_snapshots", []),
+            max_chars=getattr(args, "max_file_content_chars", 2500),
+        ),
+    ]
+    memory_section = build_memory_report_section(
+        raw_data.get("memory_context"),
+        max_items=getattr(args, "memory_show_limit", None),
+    )
+    if memory_section:
+        lines.extend(["", memory_section])
+    return "\n".join(lines).strip() + "\n"
 
 
 def classify_detail_commits(raw_data: Dict) -> List[ClassifiedCommit]:

@@ -6,6 +6,7 @@ from typing import Dict, List, Optional
 from .analyzer import AnalysisResult
 from .code_context import summarize_code_changes
 from .data_builder import ClassifiedCommit, compute_stats, identify_builtin_risks
+from .memory_context import build_memory_report_section
 from .project_context import build_project_context_section
 from .rendering import bullet_list, format_counts, risk_list
 
@@ -63,6 +64,12 @@ def format_ai_report(
     ]
     if errors:
         lines.extend(["", "## 数据拉取警告", "", bullet_list(errors)])
+    memory_section = build_memory_report_section(
+        raw_data.get("memory_context"),
+        max_items=getattr(args, "memory_show_limit", None),
+    )
+    if memory_section:
+        lines.extend(["", memory_section])
     return "\n".join(lines).strip() + "\n"
 
 
@@ -149,6 +156,12 @@ def build_raw_report(
     )
     if errors:
         lines.extend(["", "## 数据拉取警告", "", bullet_list(errors)])
+    memory_section = build_memory_report_section(
+        raw_data.get("memory_context"),
+        max_items=getattr(args, "memory_show_limit", None),
+    )
+    if memory_section:
+        lines.extend(["", memory_section])
     return "\n".join(lines).strip() + "\n"
 
 
